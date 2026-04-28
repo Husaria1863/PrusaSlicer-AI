@@ -667,13 +667,23 @@ nlohmann::json build_user_context_json(const std::string& user_prompt,
                                        const nlohmann::json& execution_history,
                                        const nlohmann::json& runtime_context)
 {
+    nlohmann::json runtime_context_sanitized = runtime_context;
+    if (runtime_context_sanitized.contains("viewport_image") &&
+        runtime_context_sanitized["viewport_image"].is_object()) {
+        nlohmann::json& viewport = runtime_context_sanitized["viewport_image"];
+        if (viewport.contains("data_url") && viewport["data_url"].is_string()) {
+            viewport["data_url_bytes"] = static_cast<int>(viewport["data_url"].get<std::string>().size());
+            viewport["data_url"] = "[omitted_in_text_payload]";
+        }
+    }
+
     nlohmann::json user_context;
     user_context["user_prompt"] = user_prompt;
     user_context["conversation_context"] = conversation_context;
     user_context["scene_snapshot"] = scene_snapshot;
     user_context["tools"] = tools;
     user_context["execution_history"] = execution_history;
-    user_context["runtime_context"] = runtime_context;
+    user_context["runtime_context"] = std::move(runtime_context_sanitized);
     return user_context;
 }
 
