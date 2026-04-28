@@ -1241,7 +1241,7 @@ void PreferencesDialog::create_ai_settings_widget()
     wxSizer* box_sizer = new wxStaticBoxSizer(box, wxVERTICAL);
 
     auto* intro = new wxStaticText(parent, wxID_ANY,
-        _L("Configure your own API key to enable AI actions in the sidebar chat panel."));
+        _L("Configure your AI provider, model, base URL, and API key to enable AI actions in the sidebar chat panel."));
     box_sizer->Add(intro, 0, wxBOTTOM | wxEXPAND, em);
 
     auto add_labeled_row = [parent, box_sizer, em](const wxString& label, wxWindow* control) {
@@ -1255,6 +1255,8 @@ void PreferencesDialog::create_ai_settings_widget()
 
     m_ai_provider_choice = new wxChoice(parent, wxID_ANY);
     m_ai_provider_choice->AppendString("openai_compatible");
+    m_ai_provider_choice->AppendString("claude");
+    m_ai_provider_choice->AppendString("gemini");
     add_labeled_row(_L("Provider"), m_ai_provider_choice);
 
     m_ai_model_text = new wxTextCtrl(parent, wxID_ANY);

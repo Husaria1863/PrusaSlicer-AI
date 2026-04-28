@@ -23,6 +23,30 @@ After cloning or downloading the ZIP, launch:
 
 Keep these binaries next to `resources/` and the bundled DLL files in the repository root.
 
+## AI Extension Features
+
+This fork includes an integrated AI assistant in the right sidebar panel.
+
+- Sidebar chat panel with conversation history, status line, `New Chat`, and single-line input (`Enter` sends).
+- Agent execution mode toggle (`Agent`) to let AI run in-app actions, with chat-only fallback when disabled.
+- First-time Agent enable confirmation dialog, centered on screen, including a `Why?` expandable explanation.
+- Vision toggle (`Vision`) to attach an image of the current 3D viewport.
+- Viewport capture is taken as currently shown (`current_viewport_as_is`) without auto-centering.
+- Configurable viewport snapshot size in AI settings (`256`, `384`, `448`, `512`, `640` px).
+- AI settings page in Preferences: provider, model, base URL, API key, vision options, and persisted AI mode flags.
+- `Factory reset AI` button clears API key and restores all AI settings to defaults.
+- Multi-provider integration: `openai_compatible`, `claude` (Anthropic Messages API), and `gemini` (Google Generative Language API).
+- Robust provider retry handling for truncated responses, including OpenAI-compatible token-parameter fallback (`max_tokens` / `max_completion_tokens`).
+- Scene-aware runtime context (selection/object geometry and project state) plus optional viewport image context.
+- Structured tool/action layer (98 actions) for common workflows: select/move/rotate/scale/arrange, import/export, split/cut/repair, slicing, project I/O, preset/setting updates, print-host actions, and undo/redo.
+- Action safety guards to reduce unintended destructive/file/printer operations unless explicitly requested in the prompt.
+
+Provider defaults:
+
+- `openai_compatible`: `https://api.openai.com/v1/chat/completions`
+- `claude`: `https://api.anthropic.com/v1/messages`
+- `gemini`: `https://generativelanguage.googleapis.com/v1beta/models`
+
 PrusaSlicer is based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community.
 
 See the [project homepage](https://www.prusa3d.com/slic3r-prusa-edition/) and

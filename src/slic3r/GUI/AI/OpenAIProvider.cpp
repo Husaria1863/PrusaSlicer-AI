@@ -4,6 +4,8 @@
 #include <cctype>
 #include <chrono>
 #include <regex>
+#include <utility>
+#include <vector>
 
 #include <boost/log/trivial.hpp>
 
@@ -24,6 +26,18 @@ constexpr size_t kMaxActionParamsSerializedSize = 32 * 1024;
 constexpr int    kInitialMaxOutputTokens        = 1400;
 constexpr int    kMaxOutputTokensCap            = 4096;
 constexpr int    kMaxContinuationRetries        = 2;
+
+const std::string kOpenAIBaseUrl   = "https://api.openai.com/v1/chat/completions";
+const std::string kClaudeBaseUrl   = "https://api.anthropic.com/v1/messages";
+const std::string kGeminiBaseUrl   = "https://generativelanguage.googleapis.com/v1beta/models";
+const std::string kAnthropicApiVer = "2023-06-01";
+
+struct InlineImageData
+{
+    bool        available { false };
+    std::string mime_type;
+    std::string base64_data;
+};
 
 std::string trim_copy(std::string value)
 {
@@ -56,6 +70,23 @@ std::string strip_control_chars(const std::string& value)
             out.push_back(static_cast<char>(c));
     }
     return out;
+}
+
+bool ends_with(const std::string& value, const std::string& suffix)
+{
+    return value.size() >= suffix.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), value.rbegin());
+}
+
+void replace_all_inplace(std::string& value, const std::string& from, const std::string& to)
+{
+    if (from.empty())
+        return;
+    size_t pos = 0;
+    while ((pos = value.find(from, pos)) != std::string::npos) {
+        value.replace(pos, from.size(), to);
+        pos += to.size();
+    }
 }
 
 bool is_loopback_host(std::string host)
@@ -114,6 +145,15 @@ bool is_valid_action_name(const std::string& name)
     });
 }
 
+void append_text_chunk(std::string& dst, const std::string& chunk)
+{
+    if (chunk.empty())
+        return;
+    if (!dst.empty())
+        dst.push_back('\n');
+    dst += chunk;
+}
+
 std::string maybe_extract_json_payload(const std::string& content)
 {
     const std::string trimmed = trim_copy(content);
@@ -131,44 +171,10 @@ std::string maybe_extract_json_payload(const std::string& content)
     return trim_copy(trimmed.substr(first_newline + 1, closing - first_newline - 1));
 }
 
-ProviderReply parse_response_json(const std::string& body)
+ProviderReply parse_payload_text(const std::string& content_raw)
 {
     ProviderReply out;
-
-    if (body.size() > kMaxResponseBodyBytes) {
-        out.error = "Provider response exceeded maximum allowed size.";
-        return out;
-    }
-
-    nlohmann::json root;
-    try {
-        root = nlohmann::json::parse(body);
-    } catch (const std::exception& e) {
-        out.error = std::string("Invalid provider response JSON: ") + e.what();
-        return out;
-    }
-
-    if (root.contains("error") && root["error"].is_object()) {
-        out.error = root["error"].value("message", "Provider returned an error.");
-        return out;
-    }
-
-    if (!root.contains("choices") || !root["choices"].is_array() || root["choices"].empty()) {
-        out.error = "Provider response did not contain choices.";
-        return out;
-    }
-
-    const nlohmann::json& choice = root["choices"].front();
-    if (!choice.contains("message") || !choice["message"].is_object()) {
-        out.error = "Provider response did not contain a message.";
-        return out;
-    }
-
-    const nlohmann::json& msg = choice["message"];
-    std::string content;
-    if (msg.contains("content") && msg["content"].is_string())
-        content = msg["content"].get<std::string>();
-
+    std::string content = content_raw;
     if (content.size() > kMaxResponseBodyBytes)
         content.resize(kMaxResponseBodyBytes);
 
@@ -196,6 +202,7 @@ ProviderReply parse_response_json(const std::string& body)
                 break;
             if (!action.is_object())
                 continue;
+
             const std::string name = action.value("name", "");
             if (!is_valid_action_name(name))
                 continue;
@@ -237,7 +244,187 @@ std::string extract_error_message_from_body(const std::string& body)
     return {};
 }
 
-bool response_indicates_length_truncation(const std::string& body)
+std::string collect_openai_content_text(const nlohmann::json& msg)
+{
+    std::string content;
+    if (!msg.contains("content"))
+        return content;
+
+    const nlohmann::json& node = msg["content"];
+    if (node.is_string()) {
+        append_text_chunk(content, node.get<std::string>());
+        return content;
+    }
+
+    if (node.is_array()) {
+        for (const nlohmann::json& part : node) {
+            if (part.is_string()) {
+                append_text_chunk(content, part.get<std::string>());
+            } else if (part.is_object()) {
+                if (part.value("type", "") == "text" && part.contains("text") && part["text"].is_string())
+                    append_text_chunk(content, part["text"].get<std::string>());
+                else if (part.contains("text") && part["text"].is_string())
+                    append_text_chunk(content, part["text"].get<std::string>());
+            }
+        }
+    }
+
+    return content;
+}
+
+std::string collect_anthropic_content_text(const nlohmann::json& root)
+{
+    std::string content;
+    if (!root.contains("content"))
+        return content;
+
+    const nlohmann::json& node = root["content"];
+    if (node.is_string()) {
+        append_text_chunk(content, node.get<std::string>());
+        return content;
+    }
+
+    if (node.is_array()) {
+        for (const nlohmann::json& part : node) {
+            if (!part.is_object())
+                continue;
+            if (part.value("type", "") == "text" && part.contains("text") && part["text"].is_string())
+                append_text_chunk(content, part["text"].get<std::string>());
+        }
+    }
+    return content;
+}
+
+std::string collect_gemini_content_text(const nlohmann::json& root)
+{
+    std::string content;
+    if (!root.contains("candidates") || !root["candidates"].is_array() || root["candidates"].empty() || !root["candidates"].front().is_object())
+        return content;
+
+    const nlohmann::json& candidate = root["candidates"].front();
+    if (!candidate.contains("content") || !candidate["content"].is_object())
+        return content;
+
+    const nlohmann::json& content_node = candidate["content"];
+    if (!content_node.contains("parts") || !content_node["parts"].is_array())
+        return content;
+
+    for (const nlohmann::json& part : content_node["parts"]) {
+        if (!part.is_object())
+            continue;
+        if (part.contains("text") && part["text"].is_string())
+            append_text_chunk(content, part["text"].get<std::string>());
+    }
+
+    return content;
+}
+
+ProviderReply parse_openai_response_json(const std::string& body)
+{
+    ProviderReply out;
+
+    if (body.size() > kMaxResponseBodyBytes) {
+        out.error = "Provider response exceeded maximum allowed size.";
+        return out;
+    }
+
+    nlohmann::json root;
+    try {
+        root = nlohmann::json::parse(body);
+    } catch (const std::exception& e) {
+        out.error = std::string("Invalid provider response JSON: ") + e.what();
+        return out;
+    }
+
+    if (root.contains("error") && root["error"].is_object()) {
+        out.error = root["error"].value("message", "Provider returned an error.");
+        return out;
+    }
+
+    if (!root.contains("choices") || !root["choices"].is_array() || root["choices"].empty()) {
+        out.error = "Provider response did not contain choices.";
+        return out;
+    }
+
+    const nlohmann::json& choice = root["choices"].front();
+    if (!choice.contains("message") || !choice["message"].is_object()) {
+        out.error = "Provider response did not contain a message.";
+        return out;
+    }
+
+    return parse_payload_text(collect_openai_content_text(choice["message"]));
+}
+
+ProviderReply parse_anthropic_response_json(const std::string& body)
+{
+    ProviderReply out;
+
+    if (body.size() > kMaxResponseBodyBytes) {
+        out.error = "Provider response exceeded maximum allowed size.";
+        return out;
+    }
+
+    nlohmann::json root;
+    try {
+        root = nlohmann::json::parse(body);
+    } catch (const std::exception& e) {
+        out.error = std::string("Invalid provider response JSON: ") + e.what();
+        return out;
+    }
+
+    if (root.contains("error") && root["error"].is_object()) {
+        out.error = root["error"].value("message", "Provider returned an error.");
+        return out;
+    }
+
+    const std::string content = collect_anthropic_content_text(root);
+    if (content.empty()) {
+        out.error = "Provider response did not contain text content.";
+        return out;
+    }
+
+    return parse_payload_text(content);
+}
+
+ProviderReply parse_gemini_response_json(const std::string& body)
+{
+    ProviderReply out;
+
+    if (body.size() > kMaxResponseBodyBytes) {
+        out.error = "Provider response exceeded maximum allowed size.";
+        return out;
+    }
+
+    nlohmann::json root;
+    try {
+        root = nlohmann::json::parse(body);
+    } catch (const std::exception& e) {
+        out.error = std::string("Invalid provider response JSON: ") + e.what();
+        return out;
+    }
+
+    if (root.contains("error") && root["error"].is_object()) {
+        out.error = root["error"].value("message", "Provider returned an error.");
+        return out;
+    }
+
+    const std::string content = collect_gemini_content_text(root);
+    if (content.empty()) {
+        if (root.contains("promptFeedback") && root["promptFeedback"].is_object()) {
+            const std::string block_reason = root["promptFeedback"].value("blockReason", "");
+            if (!block_reason.empty()) {
+                out.error = "Provider blocked the request: " + block_reason;
+                return out;
+            }
+        }
+        out.error = "Provider response did not contain text content.";
+        return out;
+    }
+
+    return parse_payload_text(content);
+}
+
+bool response_indicates_length_truncation_openai(const std::string& body)
 {
     if (body.empty())
         return false;
@@ -258,7 +445,35 @@ bool response_indicates_length_truncation(const std::string& body)
     }
 }
 
-void set_output_token_limit(nlohmann::json& body, const std::string& parameter_name, int token_limit)
+bool response_indicates_length_truncation_claude(const std::string& body)
+{
+    if (body.empty())
+        return false;
+    try {
+        const nlohmann::json root = nlohmann::json::parse(body);
+        std::string reason = lower_copy(trim_copy(root.value("stop_reason", "")));
+        return reason == "max_tokens";
+    } catch (...) {
+        return false;
+    }
+}
+
+bool response_indicates_length_truncation_gemini(const std::string& body)
+{
+    if (body.empty())
+        return false;
+    try {
+        const nlohmann::json root = nlohmann::json::parse(body);
+        if (!root.contains("candidates") || !root["candidates"].is_array() || root["candidates"].empty() || !root["candidates"].front().is_object())
+            return false;
+        const std::string reason = lower_copy(trim_copy(root["candidates"].front().value("finishReason", "")));
+        return reason == "max_tokens";
+    } catch (...) {
+        return false;
+    }
+}
+
+void set_output_token_limit_openai(nlohmann::json& body, const std::string& parameter_name, int token_limit)
 {
     body.erase("max_tokens");
     body.erase("max_completion_tokens");
@@ -281,20 +496,22 @@ bool should_switch_token_parameter(unsigned http_status,
 }
 
 void perform_provider_post(const std::string& url,
-                          const std::string& api_key,
-                          const nlohmann::json& body,
-                          const HttpRetryOpt& retry_opts,
-                          std::string& response_body,
-                          std::string& error_message,
-                          unsigned& http_status)
+                           const std::vector<std::pair<std::string, std::string>>& headers,
+                           const nlohmann::json& body,
+                           const HttpRetryOpt& retry_opts,
+                           std::string& response_body,
+                           std::string& error_message,
+                           unsigned& http_status)
 {
     response_body.clear();
     error_message.clear();
     http_status = 0;
 
-    Http::post(url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", "Bearer " + api_key)
+    auto request = Http::post(url);
+    for (const auto& header : headers)
+        request.header(header.first, header.second);
+
+    request
         .size_limit(kMaxResponseBodyBytes)
         .timeout_connect(20)
         .timeout_max(120)
@@ -311,41 +528,100 @@ void perform_provider_post(const std::string& url,
         .perform_sync(retry_opts);
 }
 
-} // namespace
-
-ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings,
-                                                        const std::string& user_prompt,
-                                                        const nlohmann::json& conversation_context,
-                                                        const nlohmann::json& scene_snapshot,
-                                                        const nlohmann::json& tools,
-                                                        const nlohmann::json& execution_history,
-                                                        const nlohmann::json& runtime_context,
-                                                        bool allow_actions)
+std::string url_encode_query_component(const std::string& value)
 {
-    ProviderReply out;
+    static const char hex[] = "0123456789ABCDEF";
 
-    const std::string model = trim_copy(settings.model.empty() ? default_settings().model : settings.model);
-    const std::string url   = trim_copy(settings.base_url.empty() ? default_base_url() : settings.base_url);
-
-    if (model.empty() || model.size() > 128 || has_control_chars(model)) {
-        out.error = "Invalid AI model identifier configured in Preferences > AI.";
-        return out;
+    std::string out;
+    out.reserve(value.size() * 3);
+    for (unsigned char c : value) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(hex[(c >> 4) & 0x0F]);
+            out.push_back(hex[c & 0x0F]);
+        }
     }
-    if (!is_secure_provider_url(url)) {
-        out.error = "AI base URL is invalid or insecure. Use HTTPS, or HTTP only for localhost/127.0.0.1.";
-        return out;
-    }
-    if (settings.api_key.empty() || settings.api_key.size() > 2048 || has_control_chars(settings.api_key)) {
-        out.error = "Invalid API key format configured in Preferences > AI.";
-        return out;
+    return out;
+}
+
+std::string append_query_param(std::string url, const std::string& key, const std::string& value)
+{
+    if (url.find('?') == std::string::npos)
+        url.push_back('?');
+    else if (!url.empty() && url.back() != '?' && url.back() != '&')
+        url.push_back('&');
+
+    url += key;
+    url.push_back('=');
+    url += url_encode_query_component(value);
+    return url;
+}
+
+std::string build_gemini_request_url(std::string base_url, const std::string& model, const std::string& api_key)
+{
+    std::string url = trim_copy(base_url);
+    if (url.empty())
+        url = kGeminiBaseUrl;
+
+    if (url.find("{model}") != std::string::npos) {
+        replace_all_inplace(url, "{model}", model);
+        if (url.find(":generateContent") == std::string::npos)
+            url += ":generateContent";
+    } else if (url.find(":generateContent") == std::string::npos) {
+        if (ends_with(url, "/models")) {
+            url += "/" + model + ":generateContent";
+        } else if (url.find("/models/") != std::string::npos) {
+            if (ends_with(url, "/"))
+                url += model;
+            if (url.find(":generateContent") == std::string::npos)
+                url += ":generateContent";
+        } else {
+            if (ends_with(url, "/"))
+                url.pop_back();
+            url += "/models/" + model + ":generateContent";
+        }
     }
 
-    nlohmann::json body;
-    body["model"] = model;
-    body["temperature"] = 0.0;
-    set_output_token_limit(body, "max_tokens", kInitialMaxOutputTokens);
+    return append_query_param(std::move(url), "key", api_key);
+}
 
-    const std::string system_prompt = allow_actions
+InlineImageData extract_inline_image(const nlohmann::json& runtime_context)
+{
+    InlineImageData out;
+    if (!runtime_context.is_object())
+        return out;
+    if (!runtime_context.contains("viewport_image") || !runtime_context["viewport_image"].is_object())
+        return out;
+
+    const nlohmann::json& image = runtime_context["viewport_image"];
+    if (!image.value("available", false))
+        return out;
+    if (!image.contains("data_url") || !image["data_url"].is_string())
+        return out;
+
+    const std::string data_url = image["data_url"].get<std::string>();
+    const std::string prefix = "data:";
+    if (data_url.rfind(prefix, 0) != 0)
+        return out;
+
+    const size_t base64_sep = data_url.find(";base64,");
+    if (base64_sep == std::string::npos || base64_sep <= prefix.size())
+        return out;
+
+    out.mime_type = data_url.substr(prefix.size(), base64_sep - prefix.size());
+    out.base64_data = data_url.substr(base64_sep + 8);
+    if (out.mime_type.empty() || out.base64_data.empty())
+        return InlineImageData{};
+
+    out.available = true;
+    return out;
+}
+
+std::string build_system_prompt(bool allow_actions)
+{
+    return allow_actions
         ? std::string(
             "You are an AI assistant integrated into PrusaSlicer. "
             "Conversation context includes summary and recent_turns from prior messages; use it to resolve follow-ups. "
@@ -380,7 +656,15 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
             "Respond with strict JSON only, no markdown. "
             "Output schema: {\"assistant_text\": string, \"actions\": []}. "
             "actions must always be an empty array.");
+}
 
+nlohmann::json build_user_context_json(const std::string& user_prompt,
+                                       const nlohmann::json& conversation_context,
+                                       const nlohmann::json& scene_snapshot,
+                                       const nlohmann::json& tools,
+                                       const nlohmann::json& execution_history,
+                                       const nlohmann::json& runtime_context)
+{
     nlohmann::json user_context;
     user_context["user_prompt"] = user_prompt;
     user_context["conversation_context"] = conversation_context;
@@ -388,6 +672,333 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
     user_context["tools"] = tools;
     user_context["execution_history"] = execution_history;
     user_context["runtime_context"] = runtime_context;
+    return user_context;
+}
+
+class ClaudeProvider final : public IAIProvider
+{
+public:
+    ProviderReply request_actions(const Settings& settings,
+                                  const std::string& user_prompt,
+                                  const nlohmann::json& conversation_context,
+                                  const nlohmann::json& scene_snapshot,
+                                  const nlohmann::json& tools,
+                                  const nlohmann::json& execution_history,
+                                  const nlohmann::json& runtime_context,
+                                  bool allow_actions) override
+    {
+        ProviderReply out;
+
+        const std::string model = trim_copy(settings.model.empty() ? "claude-3-7-sonnet-20250219" : settings.model);
+        const std::string url   = trim_copy(settings.base_url.empty() ? kClaudeBaseUrl : settings.base_url);
+
+        if (model.empty() || model.size() > 128 || has_control_chars(model)) {
+            out.error = "Invalid AI model identifier configured in Preferences > AI.";
+            return out;
+        }
+        if (!is_secure_provider_url(url)) {
+            out.error = "AI base URL is invalid or insecure. Use HTTPS, or HTTP only for localhost/127.0.0.1.";
+            return out;
+        }
+        if (settings.api_key.empty() || settings.api_key.size() > 2048 || has_control_chars(settings.api_key)) {
+            out.error = "Invalid API key format configured in Preferences > AI.";
+            return out;
+        }
+
+        const std::string system_prompt = build_system_prompt(allow_actions);
+        const nlohmann::json user_context = build_user_context_json(user_prompt, conversation_context, scene_snapshot, tools, execution_history, runtime_context);
+        const std::string user_context_text = user_context.dump();
+
+        nlohmann::json user_blocks = nlohmann::json::array({
+            nlohmann::json{{"type", "text"}, {"text", user_context_text}}
+        });
+
+        const InlineImageData image = extract_inline_image(runtime_context);
+        if (image.available) {
+            user_blocks.push_back(nlohmann::json{
+                {"type", "image"},
+                {"source", nlohmann::json{
+                    {"type", "base64"},
+                    {"media_type", image.mime_type},
+                    {"data", image.base64_data}
+                }}
+            });
+        }
+
+        nlohmann::json body;
+        body["model"] = model;
+        body["temperature"] = 0.0;
+        body["max_tokens"] = kInitialMaxOutputTokens;
+        body["system"] = system_prompt;
+        body["messages"] = nlohmann::json::array({
+            nlohmann::json{{"role", "user"}, {"content", user_blocks}}
+        });
+
+        std::string response_body;
+        std::string error_message;
+        unsigned    http_status = 0;
+        const HttpRetryOpt retry_opts{
+            std::chrono::milliseconds(700),
+            std::chrono::milliseconds(5000),
+            3
+        };
+
+        BOOST_LOG_TRIVIAL(info) << "Claude provider request started. prompt_len=" << user_prompt.size();
+
+        int max_output_tokens = kInitialMaxOutputTokens;
+        int truncation_retry_count = 0;
+        for (;;) {
+            body["max_tokens"] = max_output_tokens;
+            perform_provider_post(
+                url,
+                {
+                    {"Content-Type", "application/json"},
+                    {"x-api-key", settings.api_key},
+                    {"anthropic-version", kAnthropicApiVer}
+                },
+                body,
+                retry_opts,
+                response_body,
+                error_message,
+                http_status);
+
+            if (!error_message.empty() || http_status >= 400)
+                break;
+
+            if (!response_indicates_length_truncation_claude(response_body))
+                break;
+            if (truncation_retry_count >= kMaxContinuationRetries || max_output_tokens >= kMaxOutputTokensCap)
+                break;
+
+            ++truncation_retry_count;
+            max_output_tokens = std::min(kMaxOutputTokensCap, max_output_tokens * 2);
+            BOOST_LOG_TRIVIAL(warning)
+                << "Claude response truncated by length. Retrying with larger max_tokens="
+                << max_output_tokens << " attempt=" << truncation_retry_count;
+        }
+
+        if (!error_message.empty()) {
+            out.error = "AI request failed: " + error_message;
+            BOOST_LOG_TRIVIAL(error) << "Claude provider request failed. http_status=" << http_status;
+            return out;
+        }
+
+        if (http_status == 401 || http_status == 403) {
+            out.error = "Authentication failed. Please verify your AI API key in Preferences > AI.";
+            BOOST_LOG_TRIVIAL(error) << "Claude provider auth failure. http_status=" << http_status;
+            return out;
+        }
+
+        if (http_status == 429) {
+            const std::string provider_message = extract_error_message_from_body(response_body);
+            out.error = "AI provider rate limit or quota exceeded (HTTP 429). Check your API usage/billing and retry.";
+            if (!provider_message.empty())
+                out.error += " Provider message: " + provider_message;
+            BOOST_LOG_TRIVIAL(error) << "Claude provider rate limit/quota failure. http_status=429";
+            return out;
+        }
+
+        if (http_status >= 400) {
+            out.error = "AI provider returned HTTP " + std::to_string(http_status) + ".";
+            const std::string provider_message = extract_error_message_from_body(response_body);
+            if (!provider_message.empty())
+                out.error += " " + provider_message;
+            BOOST_LOG_TRIVIAL(error) << "Claude provider HTTP error. http_status=" << http_status;
+            return out;
+        }
+
+        ProviderReply parsed = parse_anthropic_response_json(response_body);
+        if (!parsed.ok && parsed.error.empty())
+            parsed.error = "Failed to parse AI provider response.";
+
+        if (parsed.ok)
+            BOOST_LOG_TRIVIAL(info) << "Claude provider call succeeded. actions=" << parsed.actions.size();
+        else
+            BOOST_LOG_TRIVIAL(error) << "Claude provider parse failure.";
+
+        return parsed;
+    }
+};
+
+class GeminiProvider final : public IAIProvider
+{
+public:
+    ProviderReply request_actions(const Settings& settings,
+                                  const std::string& user_prompt,
+                                  const nlohmann::json& conversation_context,
+                                  const nlohmann::json& scene_snapshot,
+                                  const nlohmann::json& tools,
+                                  const nlohmann::json& execution_history,
+                                  const nlohmann::json& runtime_context,
+                                  bool allow_actions) override
+    {
+        ProviderReply out;
+
+        const std::string model = trim_copy(settings.model.empty() ? "gemini-2.5-pro" : settings.model);
+        const std::string base_url = trim_copy(settings.base_url.empty() ? kGeminiBaseUrl : settings.base_url);
+
+        if (model.empty() || model.size() > 128 || has_control_chars(model)) {
+            out.error = "Invalid AI model identifier configured in Preferences > AI.";
+            return out;
+        }
+        if (!is_secure_provider_url(base_url)) {
+            out.error = "AI base URL is invalid or insecure. Use HTTPS, or HTTP only for localhost/127.0.0.1.";
+            return out;
+        }
+        if (settings.api_key.empty() || settings.api_key.size() > 2048 || has_control_chars(settings.api_key)) {
+            out.error = "Invalid API key format configured in Preferences > AI.";
+            return out;
+        }
+
+        const std::string url = build_gemini_request_url(base_url, model, settings.api_key);
+        const std::string system_prompt = build_system_prompt(allow_actions);
+        const nlohmann::json user_context = build_user_context_json(user_prompt, conversation_context, scene_snapshot, tools, execution_history, runtime_context);
+        const std::string user_context_text = user_context.dump();
+
+        nlohmann::json parts = nlohmann::json::array({
+            nlohmann::json{{"text", user_context_text}}
+        });
+
+        const InlineImageData image = extract_inline_image(runtime_context);
+        if (image.available) {
+            parts.push_back(nlohmann::json{
+                {"inline_data", nlohmann::json{
+                    {"mime_type", image.mime_type},
+                    {"data", image.base64_data}
+                }}
+            });
+        }
+
+        nlohmann::json body;
+        body["systemInstruction"] = nlohmann::json{
+            {"parts", nlohmann::json::array({ nlohmann::json{{"text", system_prompt}} })}
+        };
+        body["contents"] = nlohmann::json::array({
+            nlohmann::json{
+                {"role", "user"},
+                {"parts", parts}
+            }
+        });
+        body["generationConfig"] = nlohmann::json{
+            {"temperature", 0.0},
+            {"maxOutputTokens", kInitialMaxOutputTokens}
+        };
+
+        std::string response_body;
+        std::string error_message;
+        unsigned    http_status = 0;
+        const HttpRetryOpt retry_opts{
+            std::chrono::milliseconds(700),
+            std::chrono::milliseconds(5000),
+            3
+        };
+
+        BOOST_LOG_TRIVIAL(info) << "Gemini provider request started. prompt_len=" << user_prompt.size();
+
+        int max_output_tokens = kInitialMaxOutputTokens;
+        int truncation_retry_count = 0;
+        for (;;) {
+            body["generationConfig"]["maxOutputTokens"] = max_output_tokens;
+            perform_provider_post(
+                url,
+                {
+                    {"Content-Type", "application/json"}
+                },
+                body,
+                retry_opts,
+                response_body,
+                error_message,
+                http_status);
+
+            if (!error_message.empty() || http_status >= 400)
+                break;
+
+            if (!response_indicates_length_truncation_gemini(response_body))
+                break;
+            if (truncation_retry_count >= kMaxContinuationRetries || max_output_tokens >= kMaxOutputTokensCap)
+                break;
+
+            ++truncation_retry_count;
+            max_output_tokens = std::min(kMaxOutputTokensCap, max_output_tokens * 2);
+            BOOST_LOG_TRIVIAL(warning)
+                << "Gemini response truncated by length. Retrying with larger maxOutputTokens="
+                << max_output_tokens << " attempt=" << truncation_retry_count;
+        }
+
+        if (!error_message.empty()) {
+            out.error = "AI request failed: " + error_message;
+            BOOST_LOG_TRIVIAL(error) << "Gemini provider request failed. http_status=" << http_status;
+            return out;
+        }
+
+        if (http_status == 401 || http_status == 403) {
+            out.error = "Authentication failed. Please verify your AI API key in Preferences > AI.";
+            BOOST_LOG_TRIVIAL(error) << "Gemini provider auth failure. http_status=" << http_status;
+            return out;
+        }
+
+        if (http_status == 429) {
+            const std::string provider_message = extract_error_message_from_body(response_body);
+            out.error = "AI provider rate limit or quota exceeded (HTTP 429). Check your API usage/billing and retry.";
+            if (!provider_message.empty())
+                out.error += " Provider message: " + provider_message;
+            BOOST_LOG_TRIVIAL(error) << "Gemini provider rate limit/quota failure. http_status=429";
+            return out;
+        }
+
+        if (http_status >= 400) {
+            out.error = "AI provider returned HTTP " + std::to_string(http_status) + ".";
+            const std::string provider_message = extract_error_message_from_body(response_body);
+            if (!provider_message.empty())
+                out.error += " " + provider_message;
+            BOOST_LOG_TRIVIAL(error) << "Gemini provider HTTP error. http_status=" << http_status;
+            return out;
+        }
+
+        ProviderReply parsed = parse_gemini_response_json(response_body);
+        if (!parsed.ok && parsed.error.empty())
+            parsed.error = "Failed to parse AI provider response.";
+
+        if (parsed.ok)
+            BOOST_LOG_TRIVIAL(info) << "Gemini provider call succeeded. actions=" << parsed.actions.size();
+        else
+            BOOST_LOG_TRIVIAL(error) << "Gemini provider parse failure.";
+
+        return parsed;
+    }
+};
+
+} // namespace
+
+ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings,
+                                                        const std::string& user_prompt,
+                                                        const nlohmann::json& conversation_context,
+                                                        const nlohmann::json& scene_snapshot,
+                                                        const nlohmann::json& tools,
+                                                        const nlohmann::json& execution_history,
+                                                        const nlohmann::json& runtime_context,
+                                                        bool allow_actions)
+{
+    ProviderReply out;
+
+    const std::string model = trim_copy(settings.model.empty() ? "gpt-5.4" : settings.model);
+    const std::string url   = trim_copy(settings.base_url.empty() ? default_base_url() : settings.base_url);
+
+    if (model.empty() || model.size() > 128 || has_control_chars(model)) {
+        out.error = "Invalid AI model identifier configured in Preferences > AI.";
+        return out;
+    }
+    if (!is_secure_provider_url(url)) {
+        out.error = "AI base URL is invalid or insecure. Use HTTPS, or HTTP only for localhost/127.0.0.1.";
+        return out;
+    }
+    if (settings.api_key.empty() || settings.api_key.size() > 2048 || has_control_chars(settings.api_key)) {
+        out.error = "Invalid API key format configured in Preferences > AI.";
+        return out;
+    }
+
+    const std::string system_prompt = build_system_prompt(allow_actions);
+    const nlohmann::json user_context = build_user_context_json(user_prompt, conversation_context, scene_snapshot, tools, execution_history, runtime_context);
 
     nlohmann::json user_message_content = user_context.dump();
     if (runtime_context.contains("viewport_image") &&
@@ -407,6 +1018,10 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         });
     }
 
+    nlohmann::json body;
+    body["model"] = model;
+    body["temperature"] = 0.0;
+    set_output_token_limit_openai(body, "max_tokens", kInitialMaxOutputTokens);
     body["messages"] = nlohmann::json::array({
         nlohmann::json{{"role", "system"}, {"content", system_prompt}},
         nlohmann::json{{"role", "user"}, {"content", user_message_content}}
@@ -421,15 +1036,25 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         3
     };
 
-    BOOST_LOG_TRIVIAL(info) << "AI provider request started. prompt_len=" << user_prompt.size();
+    BOOST_LOG_TRIVIAL(info) << "OpenAI-compatible provider request started. prompt_len=" << user_prompt.size();
 
     int max_output_tokens = kInitialMaxOutputTokens;
     std::string token_parameter_name = "max_tokens";
     bool switched_token_parameter = false;
     int truncation_retry_count = 0;
     for (;;) {
-        set_output_token_limit(body, token_parameter_name, max_output_tokens);
-        perform_provider_post(url, settings.api_key, body, retry_opts, response_body, error_message, http_status);
+        set_output_token_limit_openai(body, token_parameter_name, max_output_tokens);
+        perform_provider_post(
+            url,
+            {
+                {"Content-Type", "application/json"},
+                {"Authorization", "Bearer " + settings.api_key}
+            },
+            body,
+            retry_opts,
+            response_body,
+            error_message,
+            http_status);
 
         if (!error_message.empty())
             break;
@@ -448,7 +1073,7 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
             break;
         }
 
-        if (!response_indicates_length_truncation(response_body))
+        if (!response_indicates_length_truncation_openai(response_body))
             break;
 
         if (truncation_retry_count >= kMaxContinuationRetries || max_output_tokens >= kMaxOutputTokensCap)
@@ -457,19 +1082,19 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         ++truncation_retry_count;
         max_output_tokens = std::min(kMaxOutputTokensCap, max_output_tokens * 2);
         BOOST_LOG_TRIVIAL(warning)
-            << "AI provider response truncated by length. Retrying with larger max_tokens="
+            << "OpenAI-compatible provider response truncated by length. Retrying with larger max_tokens="
             << max_output_tokens << " attempt=" << truncation_retry_count;
     }
 
     if (!error_message.empty()) {
         out.error = "AI request failed: " + error_message;
-        BOOST_LOG_TRIVIAL(error) << "AI provider request failed. http_status=" << http_status;
+        BOOST_LOG_TRIVIAL(error) << "OpenAI-compatible provider request failed. http_status=" << http_status;
         return out;
     }
 
     if (http_status == 401 || http_status == 403) {
         out.error = "Authentication failed. Please verify your AI API key in Preferences > AI.";
-        BOOST_LOG_TRIVIAL(error) << "AI provider auth failure. http_status=" << http_status;
+        BOOST_LOG_TRIVIAL(error) << "OpenAI-compatible provider auth failure. http_status=" << http_status;
         return out;
     }
 
@@ -478,7 +1103,7 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         out.error = "AI provider rate limit or quota exceeded (HTTP 429). Check your API usage/billing and retry.";
         if (!provider_message.empty())
             out.error += " Provider message: " + provider_message;
-        BOOST_LOG_TRIVIAL(error) << "AI provider rate limit/quota failure. http_status=429";
+        BOOST_LOG_TRIVIAL(error) << "OpenAI-compatible provider rate limit/quota failure. http_status=429";
         return out;
     }
 
@@ -487,29 +1112,33 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         const std::string provider_message = extract_error_message_from_body(response_body);
         if (!provider_message.empty())
             out.error += " " + provider_message;
-        BOOST_LOG_TRIVIAL(error) << "AI provider HTTP error. http_status=" << http_status;
+        BOOST_LOG_TRIVIAL(error) << "OpenAI-compatible provider HTTP error. http_status=" << http_status;
         return out;
     }
 
-    ProviderReply parsed = parse_response_json(response_body);
+    ProviderReply parsed = parse_openai_response_json(response_body);
     if (!parsed.ok && parsed.error.empty())
         parsed.error = "Failed to parse AI provider response.";
 
     if (parsed.ok)
-        BOOST_LOG_TRIVIAL(info) << "AI provider call succeeded. actions=" << parsed.actions.size();
+        BOOST_LOG_TRIVIAL(info) << "OpenAI-compatible provider call succeeded. actions=" << parsed.actions.size();
     else
-        BOOST_LOG_TRIVIAL(error) << "AI provider parse failure.";
+        BOOST_LOG_TRIVIAL(error) << "OpenAI-compatible provider parse failure.";
 
     return parsed;
 }
 
 std::string OpenAICompatibleProvider::default_base_url()
 {
-    return default_settings().base_url;
+    return kOpenAIBaseUrl;
 }
 
 std::unique_ptr<IAIProvider> make_provider(const std::string& provider_id)
 {
+    if (provider_id == "claude")
+        return std::make_unique<ClaudeProvider>();
+    if (provider_id == "gemini")
+        return std::make_unique<GeminiProvider>();
     if (provider_id == "openai" || provider_id == "openai_compatible" || provider_id.empty())
         return std::make_unique<OpenAICompatibleProvider>();
 

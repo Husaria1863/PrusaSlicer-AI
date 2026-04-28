@@ -27,6 +27,29 @@ const std::string kAgentModeEnabledKey        = "agent_mode_enabled";
 const std::string kAgentModeWarningAcknowledgedKey = "agent_mode_warning_acknowledged";
 const std::string kViewportImageSizePxKey     = "viewport_image_size_px";
 
+std::string default_provider()
+{
+    return "openai_compatible";
+}
+
+std::string default_model_for_provider(const std::string& provider_id)
+{
+    if (provider_id == "claude")
+        return "claude-3-7-sonnet-20250219";
+    if (provider_id == "gemini")
+        return "gemini-2.5-pro";
+    return "gpt-5.4";
+}
+
+std::string default_base_url_for_provider(const std::string& provider_id)
+{
+    if (provider_id == "claude")
+        return "https://api.anthropic.com/v1/messages";
+    if (provider_id == "gemini")
+        return "https://generativelanguage.googleapis.com/v1beta/models";
+    return "https://api.openai.com/v1/chat/completions";
+}
+
 std::string trim_copy(std::string value)
 {
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char ch) { return !std::isspace(ch); }));
@@ -52,9 +75,9 @@ bool has_control_chars(const std::string& value)
 std::string sanitize_provider(const std::string& provider_raw)
 {
     const std::string provider = lower_copy(trim_copy(provider_raw));
-    if (provider == "openai" || provider == "openai_compatible")
+    if (provider == "openai" || provider == "openai_compatible" || provider == "claude" || provider == "gemini")
         return provider;
-    return default_settings().provider;
+    return default_provider();
 }
 
 bool model_name_chars_allowed(const std::string& value)
@@ -64,11 +87,11 @@ bool model_name_chars_allowed(const std::string& value)
     });
 }
 
-std::string sanitize_model(const std::string& model_raw)
+std::string sanitize_model(const std::string& model_raw, const std::string& provider)
 {
     std::string model = trim_copy(model_raw);
     if (model.empty() || model.size() > 128 || has_control_chars(model) || !model_name_chars_allowed(model))
-        return default_settings().model;
+        return default_model_for_provider(provider);
     return model;
 }
 
@@ -124,12 +147,12 @@ bool is_secure_base_url(const std::string& url_raw)
     return scheme == "http" && is_loopback_host(host);
 }
 
-std::string sanitize_base_url(const std::string& base_url_raw)
+std::string sanitize_base_url(const std::string& base_url_raw, const std::string& provider)
 {
     const std::string url = trim_copy(base_url_raw);
     if (is_secure_base_url(url))
         return url;
-    return default_settings().base_url;
+    return default_base_url_for_provider(provider);
 }
 
 std::string sanitize_api_key(const std::string& api_key_raw)
@@ -200,9 +223,9 @@ bool Settings::has_api_key() const
 Settings default_settings()
 {
     Settings settings;
-    settings.provider = "openai_compatible";
-    settings.model    = "gpt-5.4";
-    settings.base_url = "https://api.openai.com/v1/chat/completions";
+    settings.provider = default_provider();
+    settings.model    = default_model_for_provider(settings.provider);
+    settings.base_url = default_base_url_for_provider(settings.provider);
     settings.api_key  = "";
     settings.use_viewport_image_context = false;
     settings.agent_mode_enabled = true;
@@ -221,15 +244,27 @@ Settings load_settings(const AppConfig& app_config)
 
     const std::string model = app_config.get(kSettingsSection, kModelKey);
     if (!model.empty())
-        settings.model = sanitize_model(model);
+        settings.model = sanitize_model(model, settings.provider);
+    else
+        settings.model = default_model_for_provider(settings.provider);
 
     // Migrate historical default to the current default model automatically.
-    if (settings.model == "gpt-4.1-mini")
+    if ((settings.provider == "openai" || settings.provider == "openai_compatible") && settings.model == "gpt-4.1-mini")
         settings.model = "gpt-5.4";
+    if ((settings.provider == "claude" || settings.provider == "gemini") &&
+        (settings.model == "gpt-5.4" || settings.model == "gpt-4.1-mini")) {
+        settings.model = default_model_for_provider(settings.provider);
+    }
 
     const std::string base_url = app_config.get(kSettingsSection, kBaseUrlKey);
     if (!base_url.empty())
-        settings.base_url = sanitize_base_url(base_url);
+        settings.base_url = sanitize_base_url(base_url, settings.provider);
+    else
+        settings.base_url = default_base_url_for_provider(settings.provider);
+    if ((settings.provider == "claude" || settings.provider == "gemini") &&
+        settings.base_url == "https://api.openai.com/v1/chat/completions") {
+        settings.base_url = default_base_url_for_provider(settings.provider);
+    }
 
     const std::string persisted_api_key = app_config.get(kSettingsSection, kApiKeyKey);
     if (persisted_api_key == kApiKeyStoredSentinel || persisted_api_key == "stored") {
@@ -271,8 +306,8 @@ Settings load_settings(const AppConfig& app_config)
 void save_settings(AppConfig& app_config, const Settings& settings)
 {
     const std::string provider = sanitize_provider(settings.provider);
-    const std::string model = sanitize_model(settings.model);
-    const std::string base_url = sanitize_base_url(settings.base_url);
+    const std::string model = sanitize_model(settings.model, provider);
+    const std::string base_url = sanitize_base_url(settings.base_url, provider);
     const std::string api_key = sanitize_api_key(settings.api_key);
 
     app_config.set(kSettingsSection, kProviderKey, provider);
