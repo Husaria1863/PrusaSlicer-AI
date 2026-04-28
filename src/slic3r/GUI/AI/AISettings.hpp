@@ -16,7 +16,7 @@ struct Settings
     std::string base_url;
     std::string api_key;
     bool        use_viewport_image_context { false };
-    bool        agent_mode_enabled { true };
+    bool        agent_mode_enabled { false };
     bool        agent_mode_warning_acknowledged { false };
     int         viewport_image_size_px { 448 };
 

@@ -228,7 +228,7 @@ Settings default_settings()
     settings.base_url = default_base_url_for_provider(settings.provider);
     settings.api_key  = "";
     settings.use_viewport_image_context = false;
-    settings.agent_mode_enabled = true;
+    settings.agent_mode_enabled = false;
     settings.agent_mode_warning_acknowledged = false;
     settings.viewport_image_size_px = 448;
     return settings;

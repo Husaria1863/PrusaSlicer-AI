@@ -516,7 +516,7 @@ Sidebar::Sidebar(Plater *parent)
     m_ai_agent_toggle = new wxCheckBox(m_scrolled_panel, wxID_ANY, _L("Agent"));
     m_ai_agent_toggle->SetToolTip(_L("When enabled, AI can run app actions. When disabled, AI only replies in English."));
     m_ai_agent_toggle->SetFont(wxGetApp().small_font());
-    m_ai_agent_toggle->SetValue(true);
+    m_ai_agent_toggle->SetValue(false);
     wxGetApp().UpdateDarkUI(m_ai_agent_toggle);
 
     m_ai_vision_toggle = new wxCheckBox(m_scrolled_panel, wxID_ANY, _L("Vision"));
@@ -917,7 +917,7 @@ void Sidebar::update_ai_availability()
 
     std::string reason;
     const bool available = m_ai_controller->is_available(reason);
-    const bool agent_mode_enabled = m_ai_agent_toggle == nullptr ? true : m_ai_agent_toggle->GetValue();
+    const bool agent_mode_enabled = m_ai_agent_toggle == nullptr ? false : m_ai_agent_toggle->GetValue();
 
     if (m_ai_request_in_progress) {
         if (m_ai_status_text)
@@ -1011,7 +1011,7 @@ void Sidebar::handle_ai_send()
     m_ai_request_in_progress = true;
     update_ai_availability();
 
-    const bool allow_actions = m_ai_agent_toggle == nullptr ? true : m_ai_agent_toggle->GetValue();
+    const bool allow_actions = m_ai_agent_toggle == nullptr ? false : m_ai_agent_toggle->GetValue();
     const AI::ControllerResult result = m_ai_controller->process_prompt(into_u8(message), allow_actions);
 
     for (const AI::ActionResult& action : result.action_results) {
