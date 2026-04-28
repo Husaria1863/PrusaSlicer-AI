@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <string>
 #include <boost/algorithm/string.hpp>
 
@@ -1012,7 +1013,14 @@ void Sidebar::handle_ai_send()
     update_ai_availability();
 
     const bool allow_actions = m_ai_agent_toggle == nullptr ? false : m_ai_agent_toggle->GetValue();
-    const AI::ControllerResult result = m_ai_controller->process_prompt(into_u8(message), allow_actions);
+    AI::ControllerResult result;
+    try {
+        result = m_ai_controller->process_prompt(into_u8(message), allow_actions);
+    } catch (const std::exception& e) {
+        result.error = std::string("AI request failed with an internal exception: ") + e.what();
+    } catch (...) {
+        result.error = "AI request failed with an unknown internal exception.";
+    }
 
     for (const AI::ActionResult& action : result.action_results) {
         const wxString status = action.success ? _L("ok") : _L("failed");
@@ -1023,6 +1031,8 @@ void Sidebar::handle_ai_send()
         append_ai_message(from_u8(result.error), AIMessageKind::System);
     else if (!result.assistant_text.empty())
         append_ai_message(from_u8(result.assistant_text), AIMessageKind::Assistant);
+    else
+        append_ai_message(_L("No assistant response was returned. Please try again."), AIMessageKind::System);
 
     m_ai_request_in_progress = false;
     update_ai_availability();

@@ -636,6 +636,8 @@ std::string build_system_prompt(bool allow_actions)
             "For geometric edits, prefer deterministic tools like move_selected_to, scale_selected_to_size, "
             "set_selected_rotation, cut_selected_by_ratio, place_selected_on_largest_face, get_selection_geometry, and get_object_geometry. "
             "For renaming and metadata updates, prefer rename_object / rename_volume instead of describing manual UI edits. "
+            "For FFF support requests: 'auto-generated supports on' means set support_material=true and support_material_auto=true. "
+            "'auto-generated supports off' means set support_material_auto=false (and optionally support_material=false when user asks to disable supports). "
             "For deep app options beyond presets, use get_arrange_settings/set_arrange_settings and backend settings tools. "
             "Do not guess numeric offsets when an exact tool call can compute them. "
             "Do not call undo/redo unless the current user prompt explicitly asks for undo/revert/redo. "

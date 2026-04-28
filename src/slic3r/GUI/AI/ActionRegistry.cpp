@@ -102,6 +102,13 @@ std::string alias_print_setting_key(const std::string& normalized_key)
         return "perimeter_speed";
     if (normalized_key == "support" || normalized_key == "supports")
         return "support_material";
+    if (normalized_key == "auto_support" ||
+        normalized_key == "auto_supports" ||
+        normalized_key == "auto_generated_support" ||
+        normalized_key == "auto_generated_supports" ||
+        normalized_key == "auto_support_material" ||
+        normalized_key == "auto_generated_support_material")
+        return "support_material_auto";
     if (normalized_key == "brim")
         return "brim_width";
     return {};
@@ -1513,6 +1520,27 @@ ActionResult set_setting_for_tab(Plater& plater,
     std::string deserialize_error;
     if (!set_config_option_via_deserialize(*config, key, value_text, deserialize_error))
         return make_error(action_name, "Failed to set setting '" + key + "': " + deserialize_error);
+
+    std::string dependency_note;
+    bool bool_value = false;
+    if (parse_bool(params["value"], bool_value)) {
+        if (key == "support_material_auto" &&
+            bool_value &&
+            config->def()->has("support_material") &&
+            !config->opt_bool("support_material")) {
+            if (!set_config_option_via_deserialize(*config, "support_material", "1", deserialize_error))
+                return make_error(action_name, "Failed to set dependent setting 'support_material': " + deserialize_error);
+            dependency_note = " Enabled 'support_material' because auto-generated supports require supports to be enabled.";
+        } else if (key == "support_material" &&
+                   !bool_value &&
+                   config->def()->has("support_material_auto") &&
+                   config->opt_bool("support_material_auto")) {
+            if (!set_config_option_via_deserialize(*config, "support_material_auto", "0", deserialize_error))
+                return make_error(action_name, "Failed to set dependent setting 'support_material_auto': " + deserialize_error);
+            dependency_note = " Disabled 'support_material_auto' because supports were turned off.";
+        }
+    }
+
     tab->update_dirty();
     tab->reload_config();
     tab->refresh_sidebar_frequently_changed_parameters();
@@ -1523,6 +1551,8 @@ ActionResult set_setting_for_tab(Plater& plater,
     std::string message = "Set setting '" + key + "' to " + normalized + ".";
     if (!value_note.empty())
         message += " " + value_note;
+    if (!dependency_note.empty())
+        message += dependency_note;
     return make_success(action_name, message);
 }
 
