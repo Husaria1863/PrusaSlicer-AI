@@ -114,6 +114,33 @@ std::string alias_print_setting_key(const std::string& normalized_key)
     return {};
 }
 
+std::string alias_filament_setting_key(const std::string& normalized_key)
+{
+    if (normalized_key == "filament_temperature" ||
+        normalized_key == "nozzle_temperature" ||
+        normalized_key == "extruder_temperature")
+        return "temperature";
+
+    if (normalized_key == "filament_temperature_first_layer" ||
+        normalized_key == "filament_first_layer_temperature" ||
+        normalized_key == "nozzle_temperature_first_layer" ||
+        normalized_key == "nozzle_first_layer_temperature" ||
+        normalized_key == "extruder_temperature_first_layer" ||
+        normalized_key == "extruder_first_layer_temperature" ||
+        normalized_key == "first_layer_filament_temperature")
+        return "first_layer_temperature";
+
+    if (normalized_key == "filament_bed_temperature")
+        return "bed_temperature";
+
+    if (normalized_key == "filament_bed_temperature_first_layer" ||
+        normalized_key == "filament_first_layer_bed_temperature" ||
+        normalized_key == "bed_temperature_first_layer")
+        return "first_layer_bed_temperature";
+
+    return {};
+}
+
 bool resolve_setting_key_generic(const DynamicPrintConfig& config, const std::string& requested_key, std::string& resolved_key)
 {
     if (config.def()->has(requested_key)) {
@@ -130,6 +157,12 @@ bool resolve_setting_key_generic(const DynamicPrintConfig& config, const std::st
     const std::string aliased = alias_print_setting_key(normalized);
     if (!aliased.empty() && config.def()->has(aliased)) {
         resolved_key = aliased;
+        return true;
+    }
+
+    const std::string filament_aliased = alias_filament_setting_key(normalized);
+    if (!filament_aliased.empty() && config.def()->has(filament_aliased)) {
+        resolved_key = filament_aliased;
         return true;
     }
 
