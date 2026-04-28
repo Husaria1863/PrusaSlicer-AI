@@ -8,6 +8,7 @@
 #include <set>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <boost/algorithm/string/trim_all.hpp>
 
@@ -105,6 +106,14 @@ public:
 		{ return m_storage.find(section) != m_storage.end(); }
 	const std::map<std::string, std::string>& get_section(const std::string &section) const
 		{ auto it = m_storage.find(section); assert(it != m_storage.end()); return it->second; }
+	std::vector<std::string> sections() const
+	{
+		std::vector<std::string> out;
+		out.reserve(m_storage.size());
+		for (const auto& section : m_storage)
+			out.push_back(section.first);
+		return out;
+	}
 	bool 				set_section(const std::string &section, std::map<std::string, std::string> data);
 	bool 				clear_section(const std::string &section);
 

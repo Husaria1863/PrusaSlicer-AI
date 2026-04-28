@@ -372,6 +372,7 @@ public:
 	void			load_initial_data();
 	void			update_dirty();
 	void			update_tab_ui();
+    void            refresh_sidebar_frequently_changed_parameters();
 	void			load_config(const DynamicPrintConfig& config);
 	virtual void	reload_config();
     void            update_mode();

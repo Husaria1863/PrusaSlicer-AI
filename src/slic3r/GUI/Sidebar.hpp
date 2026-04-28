@@ -31,10 +31,19 @@ class wxButton;
 class wxScrolledWindow;
 class ScalableButton;
 class ModeSizer;
+class wxStaticBox;
+class wxTextCtrl;
+class wxStaticText;
+class wxBoxSizer;
+class wxCheckBox;
 
 namespace Slic3r {
 
 namespace GUI {
+
+namespace AI {
+class AIController;
+}
 
 class ConfigOptionsGroup;
 class FreqChangedParams;
@@ -56,12 +65,20 @@ enum class ActionButtonType : int {
 
 class Sidebar : public wxPanel
 {
+    enum class AIMessageKind {
+        User,
+        Assistant,
+        Action,
+        System
+    };
+
     ConfigOptionMode    m_mode{ConfigOptionMode::comSimple};
 
     Plater*             m_plater            { nullptr };
 
     wxScrolledWindow*   m_scrolled_panel    { nullptr };
     wxPanel*            m_presets_panel     { nullptr }; // Used for MSW better layouts
+    wxBoxSizer*         m_params_sizer      { nullptr };
 
     wxFlexGridSizer*    m_presets_sizer     { nullptr };
     wxBoxSizer*         m_filaments_sizer   { nullptr };
@@ -89,6 +106,24 @@ class Sidebar : public wxPanel
     wxButton* m_btn_connect_gcode_all               { nullptr };
 	ScalableButton* m_btn_export_all_gcode_removable{ nullptr };
 
+    wxStaticBox*    m_ai_static_box                 { nullptr };
+    wxScrolledWindow* m_ai_chat_scroll              { nullptr };
+    wxBoxSizer*     m_ai_chat_messages_sizer        { nullptr };
+    wxTextCtrl*     m_ai_chat_input                 { nullptr };
+    wxStaticText*   m_ai_status_text                { nullptr };
+    wxStaticText*   m_ai_title_text                 { nullptr };
+    wxButton*       m_ai_clear_btn                  { nullptr };
+    wxButton*       m_ai_expand_btn                 { nullptr };
+    wxButton*       m_ai_open_settings_btn          { nullptr };
+    wxButton*       m_ai_send_btn                   { nullptr };
+    wxCheckBox*     m_ai_agent_toggle               { nullptr };
+    wxCheckBox*     m_ai_vision_toggle              { nullptr };
+    wxStaticBoxSizer* m_ai_sizer                    { nullptr };
+    std::unique_ptr<AI::AIController> m_ai_controller;
+    bool            m_ai_request_in_progress        { false };
+    bool            m_ai_expanded                   { false };
+    bool            m_ai_chat_has_messages          { false };
+
     std::unique_ptr<FreqChangedParams>  m_frequently_changed_parameters;
     std::unique_ptr<ObjectManipulation> m_object_manipulation;
     std::unique_ptr<ObjectSettings>     m_object_settings;
@@ -103,6 +138,12 @@ class Sidebar : public wxPanel
     void remove_unused_filament_combos(const size_t current_extruder_count);
     void update_all_preset_comboboxes();
     void update_reslice_btn_tooltip();
+    void update_ai_availability();
+    void apply_ai_panel_layout_mode();
+    void toggle_ai_panel_layout_mode();
+    void rewrap_ai_messages();
+    void append_ai_message(const wxString& line, AIMessageKind kind = AIMessageKind::System);
+    void handle_ai_send();
 
     void show_preset_comboboxes();
     void on_select_preset(wxCommandEvent& evt);

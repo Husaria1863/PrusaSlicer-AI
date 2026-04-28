@@ -5902,6 +5902,47 @@ void Plater::export_gcode(bool prefer_removable)
     });
 }
 
+std::optional<std::string> Plater::export_gcode_explicit_path(const fs::path& requested_path, bool prefer_removable)
+{
+    if (p->model.objects.empty())
+        return std::string("There are no objects to export.");
+
+    if (canvas3D()->get_gizmos_manager().is_in_editing_mode(true))
+        return std::string("Cannot export while a gizmo is in editing mode.");
+
+    if (!is_sliceable(s_print_statuses[s_multiple_beds.get_active_bed()]))
+        return std::string("Current scene is not sliceable yet.");
+
+    const auto optional_default_output_file{this->get_default_output_file()};
+    if (!optional_default_output_file)
+        return std::string("Failed to compute default output file.");
+    const fs::path &default_output_file{*optional_default_output_file};
+
+    fs::path output_path = requested_path;
+    if (output_path.empty())
+        return std::string("Output path is empty.");
+
+    if (output_path.is_relative()) {
+        const std::string start_dir{get_output_start_dir(prefer_removable, default_output_file)};
+        output_path = fs::path(start_dir) / output_path;
+    }
+
+    if (output_path.filename().empty())
+        return std::string("Output path must include a file name.");
+
+    if (!output_path.has_extension())
+        output_path.replace_extension(default_output_file.extension());
+
+    if (auto error{check_output_path_has_error(output_path)})
+        return into_u8(*error);
+
+    export_gcode_to_path(output_path, [&](const bool path_on_removable_media) {
+        p->export_gcode(output_path, path_on_removable_media, PrintHostJob());
+    });
+
+    return std::nullopt;
+}
+
 void Plater::export_gcode_to_path(
     const fs::path &output_path,
     const std::function<void(bool)> &export_callback

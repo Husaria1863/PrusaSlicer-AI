@@ -21,6 +21,7 @@
 #include "FrequentlyChangedParameters.hpp"
 #include "Plater.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <boost/algorithm/string.hpp>
@@ -31,6 +32,10 @@
 #include <wx/bmpcbox.h>
 #include <wx/statbox.h>
 #include <wx/statbmp.h>
+#include <wx/textctrl.h>
+#include <wx/checkbox.h>
+#include <wx/hyperlink.h>
+#include <wx/scrolwin.h>
 #include <wx/wupdlock.h> // IWYU pragma: keep
 #include "libslic3r/MultipleBeds.hpp"
 #include "wx/generic/stattextg.h"
@@ -61,12 +66,66 @@
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
+#include "AI/AIController.hpp"
+#include "AI/AISettings.hpp"
 
 using Slic3r::Preset;
 using Slic3r::GUI::format_wxstr;
 
 namespace Slic3r {
 namespace GUI {
+
+namespace {
+
+bool confirm_agent_mode_enable(wxWindow* parent)
+{
+    wxDialog dialog(parent,
+                    wxID_ANY,
+                    _L("Agent Mode Confirmation"),
+                    wxDefaultPosition,
+                    wxDefaultSize,
+                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+
+    auto* root = new wxBoxSizer(wxVERTICAL);
+    auto* message = new wxStaticText(&dialog,
+                                     wxID_ANY,
+                                     _L("Agent mode is not recommended for beginners or anybody still learning 3D printing. Are you sure you want to continue?"));
+    message->Wrap(520);
+    root->Add(message, 0, wxALL | wxEXPAND, 12);
+
+    auto* why_link = new wxHyperlinkCtrl(&dialog, wxID_ANY, _L("Why?"), "about:blank");
+    root->Add(why_link, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+
+    auto* explanation = new wxStaticText(&dialog,
+                                         wxID_ANY,
+                                         _L("While the Agent is convenient for modifying print instructions quickly, it bypasses explanations as to why certain settings are modified during initial setup or iterative prototyping. It is recommended to first learn how to manipulate the project and model yourself to gain an understanding of 3D printing and then enable the Agent later to save time."));
+    explanation->Wrap(520);
+    explanation->Hide();
+    root->Add(explanation, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+
+    why_link->Bind(wxEVT_HYPERLINK, [&, explanation](wxHyperlinkEvent& event) {
+        explanation->Show(!explanation->IsShown());
+        dialog.Layout();
+        dialog.Fit();
+        dialog.CentreOnScreen(wxBOTH);
+        event.Skip(false);
+    });
+
+    auto* buttons = new wxStdDialogButtonSizer();
+    auto* continue_btn = new wxButton(&dialog, wxID_OK, _L("Continue"));
+    auto* cancel_btn = new wxButton(&dialog, wxID_CANCEL, _L("Cancel"));
+    buttons->AddButton(continue_btn);
+    buttons->AddButton(cancel_btn);
+    buttons->Realize();
+    root->Add(buttons, 0, wxALL | wxALIGN_CENTER_HORIZONTAL, 12);
+
+    dialog.SetSizerAndFit(root);
+    dialog.SetMinSize(wxSize(560, dialog.GetSize().GetHeight()));
+    dialog.CentreOnScreen(wxBOTH);
+    return dialog.ShowModal() == wxID_OK;
+}
+
+} // namespace
 
 class ObjectInfo : public wxStaticBoxSizer
 {
@@ -406,7 +465,8 @@ Sidebar::Sidebar(Plater *parent)
     init_combo(&m_combo_sla_material,  _L("SLA material"),       Preset::TYPE_SLA_MATERIAL,  false);
     init_combo(&m_combo_printer,       _L("Printer"),            Preset::TYPE_PRINTER,       false);
 
-    wxBoxSizer* params_sizer = new wxBoxSizer(wxVERTICAL);
+    m_params_sizer = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer* params_sizer = m_params_sizer;
 
     // Frequently changed parameters
     m_frequently_changed_parameters = std::make_unique<FreqChangedParams>(m_scrolled_panel);
@@ -415,6 +475,157 @@ Sidebar::Sidebar(Plater *parent)
         | wxRIGHT
 #endif // __WXGTK3__
         , wxOSX ? 1 : margin_5);
+
+    // AI panel.
+    m_ai_sizer = new wxStaticBoxSizer(new wxStaticBox(m_scrolled_panel, wxID_ANY, _L("AI Assistant")), wxVERTICAL);
+    auto *ai_sizer = m_ai_sizer;
+    m_ai_static_box = ai_sizer->GetStaticBox();
+    m_ai_static_box->SetFont(wxGetApp().bold_font());
+    wxGetApp().UpdateDarkUI(m_ai_static_box);
+
+    m_ai_controller = std::make_unique<AI::AIController>(*m_plater);
+
+    m_ai_title_text = new wxStaticText(m_scrolled_panel, wxID_ANY, _L("Natural-language control for scene, transforms, and slicing."));
+    m_ai_title_text->SetFont(wxGetApp().small_font());
+    wxGetApp().UpdateDarkUI(m_ai_title_text);
+
+    m_ai_chat_scroll = new wxScrolledWindow(m_scrolled_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
+    m_ai_chat_scroll->SetScrollRate(0, 8);
+    m_ai_chat_scroll->SetMinSize(wxSize(-1, 7 * wxGetApp().em_unit()));
+    m_ai_chat_messages_sizer = new wxBoxSizer(wxVERTICAL);
+    m_ai_chat_scroll->SetSizer(m_ai_chat_messages_sizer);
+    wxGetApp().UpdateDarkUI(m_ai_chat_scroll);
+
+    m_ai_status_text = new wxStaticText(m_scrolled_panel, wxID_ANY, wxEmptyString);
+    m_ai_status_text->SetFont(wxGetApp().small_font());
+    wxGetApp().UpdateDarkUI(m_ai_status_text);
+
+    m_ai_chat_input = new wxTextCtrl(m_scrolled_panel, wxID_ANY, "",
+                                     wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    m_ai_chat_input->SetHint(_L("Ask AI anything... (Enter to send)"));
+    m_ai_expand_btn = new wxButton(m_scrolled_panel, wxID_ANY, _L("▶ Expand AI Panel"));
+    wxGetApp().SetWindowVariantForButton(m_ai_expand_btn);
+    wxGetApp().UpdateDarkUI(m_ai_expand_btn, true);
+    m_ai_clear_btn = new wxButton(m_scrolled_panel, wxID_ANY, _L("New Chat"));
+    wxGetApp().SetWindowVariantForButton(m_ai_clear_btn);
+    wxGetApp().UpdateDarkUI(m_ai_clear_btn, true);
+    m_ai_open_settings_btn = new wxButton(m_scrolled_panel, wxID_ANY, _L("AI settings"));
+    wxGetApp().SetWindowVariantForButton(m_ai_open_settings_btn);
+    wxGetApp().UpdateDarkUI(m_ai_open_settings_btn, true);
+
+    m_ai_agent_toggle = new wxCheckBox(m_scrolled_panel, wxID_ANY, _L("Agent"));
+    m_ai_agent_toggle->SetToolTip(_L("When enabled, AI can run app actions. When disabled, AI only replies in English."));
+    m_ai_agent_toggle->SetFont(wxGetApp().small_font());
+    m_ai_agent_toggle->SetValue(true);
+    wxGetApp().UpdateDarkUI(m_ai_agent_toggle);
+
+    m_ai_vision_toggle = new wxCheckBox(m_scrolled_panel, wxID_ANY, _L("Vision"));
+    m_ai_vision_toggle->SetToolTip(_L("Attach the current viewport snapshot to AI requests."));
+    m_ai_vision_toggle->SetFont(wxGetApp().small_font());
+    wxGetApp().UpdateDarkUI(m_ai_vision_toggle);
+    if (wxGetApp().app_config != nullptr) {
+        const AI::Settings settings = AI::load_settings(*wxGetApp().app_config);
+        if (m_ai_agent_toggle != nullptr)
+            m_ai_agent_toggle->SetValue(settings.agent_mode_enabled);
+        m_ai_vision_toggle->SetValue(settings.use_viewport_image_context);
+    }
+
+    m_ai_send_btn = new wxButton(m_scrolled_panel, wxID_ANY, _L("Send"));
+    wxGetApp().SetWindowVariantForButton(m_ai_send_btn);
+    m_ai_send_btn->SetFont(wxGetApp().bold_font());
+    wxGetApp().UpdateDarkUI(m_ai_send_btn, true);
+
+    auto *ai_header_sizer = new wxBoxSizer(wxHORIZONTAL);
+    ai_header_sizer->Add(m_ai_title_text, 1, wxEXPAND | wxRIGHT, margin_5);
+    ai_header_sizer->Add(m_ai_clear_btn, 0);
+
+    auto *ai_input_sizer = new wxBoxSizer(wxHORIZONTAL);
+    ai_input_sizer->Add(m_ai_chat_input, 1, wxEXPAND);
+    ai_input_sizer->Add(m_ai_send_btn, 0, wxLEFT, margin_5);
+
+    auto *ai_controls_sizer = new wxBoxSizer(wxHORIZONTAL);
+    ai_controls_sizer->Add(m_ai_agent_toggle, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, margin_5);
+    ai_controls_sizer->Add(m_ai_vision_toggle, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, margin_5);
+    ai_controls_sizer->AddStretchSpacer(1);
+    ai_controls_sizer->Add(m_ai_open_settings_btn, 0, wxALIGN_CENTER_VERTICAL);
+
+    ai_sizer->Add(ai_header_sizer, 0, wxEXPAND | wxBOTTOM, margin_5 / 2);
+    ai_sizer->Add(m_ai_chat_scroll, 1, wxEXPAND | wxBOTTOM, margin_5);
+    ai_sizer->Add(m_ai_status_text, 0, wxBOTTOM, margin_5 / 2);
+    ai_sizer->Add(ai_input_sizer, 0, wxEXPAND);
+    ai_sizer->Add(ai_controls_sizer, 0, wxEXPAND | wxTOP, margin_5 / 2);
+    ai_sizer->Add(m_ai_expand_btn, 0, wxEXPAND | wxTOP, margin_5 / 2);
+    params_sizer->Add(ai_sizer, 0, wxEXPAND | wxBOTTOM, margin_5);
+
+    m_ai_expand_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { toggle_ai_panel_layout_mode(); });
+    m_ai_clear_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if (m_ai_chat_messages_sizer) {
+            m_ai_chat_messages_sizer->Clear(true);
+            m_ai_chat_has_messages = false;
+            if (m_ai_chat_scroll) {
+                m_ai_chat_scroll->Layout();
+                m_ai_chat_scroll->FitInside();
+            }
+        }
+        if (m_ai_controller)
+            m_ai_controller->reset_chat();
+        update_ai_availability();
+    });
+    m_ai_open_settings_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxGetApp().open_preferences(std::string(), "AI");
+    });
+    auto persist_ai_toggles = [this]() {
+        if (wxGetApp().app_config == nullptr)
+            return;
+
+        AI::Settings settings = AI::load_settings(*wxGetApp().app_config);
+        if (m_ai_vision_toggle != nullptr)
+            settings.use_viewport_image_context = m_ai_vision_toggle->GetValue();
+        if (m_ai_agent_toggle != nullptr)
+            settings.agent_mode_enabled = m_ai_agent_toggle->GetValue();
+        AI::save_settings(*wxGetApp().app_config, settings);
+        update_ai_availability();
+    };
+    if (m_ai_vision_toggle != nullptr)
+        m_ai_vision_toggle->Bind(wxEVT_CHECKBOX, [persist_ai_toggles](wxCommandEvent&) { persist_ai_toggles(); });
+    if (m_ai_agent_toggle != nullptr) {
+        m_ai_agent_toggle->Bind(wxEVT_CHECKBOX, [this, persist_ai_toggles](wxCommandEvent&) {
+            if (wxGetApp().app_config == nullptr || m_ai_agent_toggle == nullptr) {
+                persist_ai_toggles();
+                return;
+            }
+
+            if (!m_ai_agent_toggle->GetValue()) {
+                persist_ai_toggles();
+                return;
+            }
+
+            AI::Settings settings = AI::load_settings(*wxGetApp().app_config);
+            if (!settings.agent_mode_warning_acknowledged) {
+                if (!confirm_agent_mode_enable(this)) {
+                    m_ai_agent_toggle->SetValue(false);
+                    persist_ai_toggles();
+                    return;
+                }
+                settings.agent_mode_warning_acknowledged = true;
+            }
+
+            if (m_ai_vision_toggle != nullptr)
+                settings.use_viewport_image_context = m_ai_vision_toggle->GetValue();
+            settings.agent_mode_enabled = m_ai_agent_toggle->GetValue();
+            AI::save_settings(*wxGetApp().app_config, settings);
+            update_ai_availability();
+        });
+    }
+
+    m_ai_send_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { handle_ai_send(); });
+    m_ai_chat_input->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { handle_ai_send(); });
+    m_ai_chat_scroll->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+        rewrap_ai_messages();
+        event.Skip();
+    });
+    apply_ai_panel_layout_mode();
+    update_ai_availability();
 
     // Object List
     m_object_list = new ObjectList(m_scrolled_panel);
@@ -584,6 +795,237 @@ Sidebar::Sidebar(Plater *parent)
     m_btn_connect_gcode_all->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         this->m_plater->connect_gcode_all();
     });
+}
+
+void Sidebar::append_ai_message(const wxString& line, AIMessageKind kind)
+{
+    if (!m_ai_chat_scroll || !m_ai_chat_messages_sizer)
+        return;
+
+    wxColour text_color(225, 225, 225);
+    wxColour bg_color(50, 50, 50);
+    bool align_right = false;
+    switch (kind) {
+    case AIMessageKind::User:
+        text_color = wxColour(236, 243, 250);
+        bg_color = wxColour(46, 66, 92);
+        align_right = true;
+        break;
+    case AIMessageKind::Assistant:
+        text_color = wxColour(228, 236, 228);
+        bg_color = wxColour(40, 46, 52);
+        break;
+    case AIMessageKind::Action:
+        text_color = wxColour(247, 225, 168);
+        bg_color = wxColour(68, 55, 36);
+        break;
+    default:
+        text_color = wxColour(185, 185, 185);
+        bg_color = wxColour(28, 28, 28);
+        break;
+    }
+
+    auto *row = new wxBoxSizer(wxHORIZONTAL);
+    auto *bubble = new wxPanel(m_ai_chat_scroll);
+    bubble->SetBackgroundColour(bg_color);
+    auto *bubble_sizer = new wxBoxSizer(wxVERTICAL);
+    auto *label = new wxStaticText(bubble, wxID_ANY, line);
+    label->SetForegroundColour(text_color);
+    label->SetFont(wxGetApp().small_font());
+
+    const int wrap_width = std::max(180, (m_ai_chat_scroll->GetClientSize().GetWidth() * 72) / 100);
+    label->SetMinSize(wxSize(wrap_width, -1));
+    label->SetMaxSize(wxSize(wrap_width, -1));
+    label->Wrap(wrap_width);
+    bubble->SetMaxSize(wxSize(wrap_width + 16, -1));
+
+    bubble_sizer->Add(label, 0, wxALL, 8);
+    bubble->SetSizerAndFit(bubble_sizer);
+    wxGetApp().UpdateDarkUI(label);
+
+    if (align_right) {
+        row->AddStretchSpacer(1);
+        row->Add(bubble, 0, wxLEFT, 18);
+    } else {
+        row->Add(bubble, 0, wxRIGHT, 18);
+        row->AddStretchSpacer(1);
+    }
+
+    m_ai_chat_messages_sizer->Add(row, 0, wxEXPAND | wxTOP | wxBOTTOM, 3);
+    m_ai_chat_has_messages = true;
+    rewrap_ai_messages();
+    m_ai_chat_scroll->Layout();
+    m_ai_chat_scroll->FitInside();
+    m_ai_chat_scroll->Scroll(0, m_ai_chat_scroll->GetScrollRange(wxVERTICAL));
+}
+
+void Sidebar::rewrap_ai_messages()
+{
+    if (!m_ai_chat_scroll || !m_ai_chat_messages_sizer)
+        return;
+
+    const int scroll_width = m_ai_chat_scroll->GetClientSize().GetWidth();
+    if (scroll_width <= 0)
+        return;
+
+    const int wrap_width = std::max(180, (scroll_width * 72) / 100);
+    wxSizerItemList& rows = m_ai_chat_messages_sizer->GetChildren();
+    for (wxSizerItemList::compatibility_iterator row_it = rows.GetFirst(); row_it; row_it = row_it->GetNext()) {
+        wxSizerItem* row_item = row_it->GetData();
+        wxSizer* row_sizer = row_item ? row_item->GetSizer() : nullptr;
+        if (row_sizer == nullptr)
+            continue;
+
+        wxWindow* bubble_window = nullptr;
+        wxSizerItemList& row_children = row_sizer->GetChildren();
+        for (wxSizerItemList::compatibility_iterator child_it = row_children.GetFirst(); child_it; child_it = child_it->GetNext()) {
+            wxSizerItem* child_item = child_it->GetData();
+            if (child_item && child_item->IsWindow()) {
+                bubble_window = child_item->GetWindow();
+                break;
+            }
+        }
+
+        wxPanel* bubble = dynamic_cast<wxPanel*>(bubble_window);
+        if (bubble == nullptr || bubble->GetSizer() == nullptr)
+            continue;
+
+        wxSizerItem* label_item = bubble->GetSizer()->GetItem(size_t(0));
+        if (label_item == nullptr || !label_item->IsWindow())
+            continue;
+
+        wxStaticText* label = dynamic_cast<wxStaticText*>(label_item->GetWindow());
+        if (label == nullptr)
+            continue;
+
+        label->SetMinSize(wxSize(wrap_width, -1));
+        label->SetMaxSize(wxSize(wrap_width, -1));
+        label->Wrap(wrap_width);
+        bubble->SetMaxSize(wxSize(wrap_width + 16, -1));
+        bubble->Layout();
+        bubble->Fit();
+    }
+
+    m_ai_chat_scroll->Layout();
+    m_ai_chat_scroll->FitInside();
+}
+
+void Sidebar::update_ai_availability()
+{
+    if (!m_ai_controller)
+        return;
+
+    std::string reason;
+    const bool available = m_ai_controller->is_available(reason);
+    const bool agent_mode_enabled = m_ai_agent_toggle == nullptr ? true : m_ai_agent_toggle->GetValue();
+
+    if (m_ai_request_in_progress) {
+        if (m_ai_status_text)
+            m_ai_status_text->SetLabel(_L("Assistant is processing..."));
+    } else {
+        if (m_ai_status_text) {
+            if (available)
+                m_ai_status_text->SetLabel(agent_mode_enabled ? _L("Assistant ready (agent mode).")
+                                                               : _L("Assistant ready (chat-only mode)."));
+            else
+                m_ai_status_text->SetLabel(from_u8(reason));
+        }
+    }
+
+    const bool enable_input = available && !m_ai_request_in_progress;
+    if (m_ai_chat_input)
+        m_ai_chat_input->Enable(enable_input);
+    if (m_ai_send_btn)
+        m_ai_send_btn->Enable(enable_input);
+
+    if (!available && !m_ai_chat_has_messages)
+        append_ai_message(from_u8(reason), AIMessageKind::System);
+}
+
+void Sidebar::apply_ai_panel_layout_mode()
+{
+    if (!m_ai_chat_scroll || !m_ai_expand_btn || !m_ai_title_text || !m_params_sizer || !m_ai_sizer)
+        return;
+
+    const int em = wxGetApp().em_unit();
+    wxSizerItem* ai_item = m_params_sizer->GetItem(m_ai_sizer, true);
+
+    if (m_ai_expanded) {
+        m_ai_expand_btn->SetLabel(_L("▼ Collapse AI Panel"));
+        m_ai_title_text->Show(true);
+        m_ai_title_text->Wrap(std::max(180, m_scrolled_panel->GetClientSize().GetWidth() - 40));
+        m_ai_chat_scroll->SetMinSize(wxSize(-1, 8 * em));
+
+        if (ai_item)
+            ai_item->SetProportion(1);
+
+        if (m_object_list && m_object_list->get_sizer())
+            m_object_list->get_sizer()->Show(false);
+    } else {
+        m_ai_expand_btn->SetLabel(_L("▶ Expand AI Panel"));
+        m_ai_title_text->Show(false);
+        m_ai_chat_scroll->SetMinSize(wxSize(-1, 7 * em));
+
+        if (ai_item)
+            ai_item->SetProportion(0);
+
+        if (m_object_list && m_object_list->get_sizer())
+            m_object_list->get_sizer()->Show(m_mode > comSimple);
+    }
+
+    if (m_scrolled_panel) {
+        m_scrolled_panel->Layout();
+        m_scrolled_panel->FitInside();
+    }
+    rewrap_ai_messages();
+    Layout();
+}
+
+void Sidebar::toggle_ai_panel_layout_mode()
+{
+    m_ai_expanded = !m_ai_expanded;
+    apply_ai_panel_layout_mode();
+}
+
+void Sidebar::handle_ai_send()
+{
+    if (m_ai_request_in_progress || !m_ai_controller || !m_ai_chat_input)
+        return;
+
+    wxString message = m_ai_chat_input->GetValue();
+    message.Trim(true);
+    message.Trim(false);
+    if (message.IsEmpty())
+        return;
+
+    append_ai_message(message, AIMessageKind::User);
+    m_ai_chat_input->Clear();
+
+    std::string availability_reason;
+    if (!m_ai_controller->is_available(availability_reason)) {
+        append_ai_message(from_u8(availability_reason), AIMessageKind::System);
+        update_ai_availability();
+        return;
+    }
+
+    m_ai_request_in_progress = true;
+    update_ai_availability();
+
+    const bool allow_actions = m_ai_agent_toggle == nullptr ? true : m_ai_agent_toggle->GetValue();
+    const AI::ControllerResult result = m_ai_controller->process_prompt(into_u8(message), allow_actions);
+
+    for (const AI::ActionResult& action : result.action_results) {
+        const wxString status = action.success ? _L("ok") : _L("failed");
+        append_ai_message("Action " + from_u8(action.name) + " [" + status + "]: " + from_u8(action.message), AIMessageKind::Action);
+    }
+
+    if (!result.error.empty())
+        append_ai_message(from_u8(result.error), AIMessageKind::System);
+    else if (!result.assistant_text.empty())
+        append_ai_message(from_u8(result.assistant_text), AIMessageKind::Assistant);
+
+    m_ai_request_in_progress = false;
+    update_ai_availability();
 }
 
 Sidebar::~Sidebar() {}
@@ -804,6 +1246,8 @@ void Sidebar::msw_rescale()
     m_object_list                  ->msw_rescale();
     m_object_manipulation          ->msw_rescale();
     m_object_layers                ->msw_rescale();
+    if (m_ai_chat_scroll != nullptr)
+        m_ai_chat_scroll->SetMinSize(wxSize(-1, (m_ai_expanded ? 20 : 7) * wxGetApp().em_unit()));
 
 #ifdef _WIN32
     const int scaled_height = m_btn_export_gcode_removable->GetBitmapHeight();
@@ -821,12 +1265,14 @@ void Sidebar::sys_color_changed()
 #ifdef _WIN32
     wxWindowUpdateLocker noUpdates(this);
 
-    for (wxWindow* win : std::vector<wxWindow*>{ this, m_sliced_info->GetStaticBox(), m_object_info->GetStaticBox(), m_btn_reslice, m_btn_export_gcode })
+    for (wxWindow* win : std::vector<wxWindow*>{ this, m_sliced_info->GetStaticBox(), m_object_info->GetStaticBox(), m_ai_static_box, m_btn_reslice, m_btn_export_gcode })
         wxGetApp().UpdateDarkUI(win);
     for (wxWindow* win : std::vector<wxWindow*>{ m_scrolled_panel, m_presets_panel })
         wxGetApp().UpdateAllStaticTextDarkUI(win);
-    for (wxWindow* btn : std::vector<wxWindow*>{ m_btn_reslice, m_btn_export_gcode, m_btn_connect_gcode })
+    for (wxWindow* btn : std::vector<wxWindow*>{ m_btn_reslice, m_btn_export_gcode, m_btn_connect_gcode, m_ai_send_btn, m_ai_open_settings_btn, m_ai_clear_btn, m_ai_expand_btn })
         wxGetApp().UpdateDarkUI(btn, true);
+    for (wxWindow* win : std::vector<wxWindow*>{ m_ai_chat_scroll, m_ai_chat_input, m_ai_status_text, m_ai_title_text, m_ai_agent_toggle, m_ai_vision_toggle })
+        wxGetApp().UpdateDarkUI(win);
 
     m_frequently_changed_parameters->sys_color_changed();
     m_object_settings              ->sys_color_changed();
@@ -1230,6 +1676,8 @@ void Sidebar::update_mode()
         m_object_manipulation->set_coordinates_type(ECoordinatesType::World);
 
     m_object_list->get_sizer()->Show(m_mode > comSimple);
+    if (m_ai_expanded)
+        m_object_list->get_sizer()->Show(false);
 
     m_object_list->unselect_objects();
     m_object_list->update_selections();
@@ -1266,6 +1714,14 @@ void Sidebar::update_ui_from_settings()
     show_info_sizer();
     update_sliced_info_sizer();
     m_object_list->apply_volumes_order();
+    if ((m_ai_vision_toggle != nullptr || m_ai_agent_toggle != nullptr) && wxGetApp().app_config != nullptr) {
+        const AI::Settings settings = AI::load_settings(*wxGetApp().app_config);
+        if (m_ai_vision_toggle != nullptr)
+            m_ai_vision_toggle->SetValue(settings.use_viewport_image_context);
+        if (m_ai_agent_toggle != nullptr)
+            m_ai_agent_toggle->SetValue(settings.agent_mode_enabled);
+    }
+    update_ai_availability();
 }
 
 void Sidebar::set_extruders_count(size_t extruders_count)

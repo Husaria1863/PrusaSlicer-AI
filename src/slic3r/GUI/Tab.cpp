@@ -881,6 +881,12 @@ void Tab::update_tab_ui()
     m_presets_choice->update();
 }
 
+void Tab::refresh_sidebar_frequently_changed_parameters()
+{
+    if (m_type == Preset::TYPE_PRINT || m_type == Preset::TYPE_SLA_PRINT)
+        update_frequently_changed_parameters();
+}
+
 // Load a provied DynamicConfig into the tab, modifying the active preset.
 // This could be used for example by setting a Wipe Tower position by interactive manipulation in the 3D view.
 void Tab::load_config(const DynamicPrintConfig& config)

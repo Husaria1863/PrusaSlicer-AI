@@ -23,6 +23,11 @@ class wxColourPickerCtrl;
 class wxBookCtrlBase;
 class wxSlider;
 class wxRadioButton;
+class wxTextCtrl;
+class wxChoice;
+class wxStaticText;
+class wxCheckBox;
+class wxButton;
 
 namespace Slic3r {
 
@@ -47,6 +52,7 @@ class PreferencesDialog : public DPIDialog
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_general;
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_camera;
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_gui;
+	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_ai;
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_other;
 #ifdef _WIN32
 	std::shared_ptr<ConfigOptionsGroup>	m_optgroup_dark_mode;
@@ -66,6 +72,15 @@ class PreferencesDialog : public DPIDialog
 	wxColourPickerCtrl*					m_mode_simple    { nullptr };
 	wxColourPickerCtrl*					m_mode_advanced  { nullptr };
 	wxColourPickerCtrl*					m_mode_expert    { nullptr };
+
+	wxChoice*                           m_ai_provider_choice { nullptr };
+	wxTextCtrl*                         m_ai_model_text      { nullptr };
+	wxTextCtrl*                         m_ai_base_url_text   { nullptr };
+	wxTextCtrl*                         m_ai_api_key_text    { nullptr };
+	wxCheckBox*                         m_ai_viewport_context_checkbox { nullptr };
+	wxChoice*                           m_ai_viewport_size_choice { nullptr };
+	wxStaticText*                       m_ai_key_status      { nullptr };
+	wxButton*                           m_ai_factory_reset_btn { nullptr };
 
 	DownloaderUtils::Worker*			downloader { nullptr };
 
@@ -106,6 +121,10 @@ protected:
     void create_settings_mode_color_widget();
     void create_settings_font_widget();
     void create_downloader_path_sizer();
+    void create_ai_settings_widget();
+    void sync_ai_settings_from_config();
+    void update_ai_key_status_label();
+    void reset_ai_settings_to_factory_defaults();
 	void init_highlighter(const t_config_option_key& opt_key);
 	std::vector<ConfigOptionsGroup*> optgroups();
 

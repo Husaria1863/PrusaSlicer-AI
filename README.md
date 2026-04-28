@@ -12,6 +12,17 @@ compatible with any modern printer based on the RepRap toolchain, including all
 those based on the Marlin, Prusa, Sprinter and Repetier firmware. It also works
 with Mach3, LinuxCNC and Machinekit controllers.
 
+## Run from this repository (Windows)
+
+This repository includes a portable Windows runtime build in the root directory.
+After cloning or downloading the ZIP, launch:
+
+- `prusa-slicer.exe` (GUI)
+- `prusa-slicer-console.exe` (CLI)
+- `prusa-gcodeviewer.exe` (G-code viewer)
+
+Keep these binaries next to `resources/` and the bundled DLL files in the repository root.
+
 PrusaSlicer is based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community.
 
 See the [project homepage](https://www.prusa3d.com/slic3r-prusa-edition/) and

@@ -21,11 +21,14 @@
 #include "GLCanvas3D.hpp"
 #include "ConfigWizard.hpp"
 #include "Search.hpp"
+#include "AI/AISettings.hpp"
 
 #include "Widgets/SpinInput.hpp"
 
 #include <boost/dll/runtime_symbol_info.hpp>
 
+#include <wx/choice.h>
+#include <wx/textctrl.h>
 #ifdef WIN32
 #include <wx/msw/registry.h>
 #endif // WIN32
@@ -157,6 +160,9 @@ void PreferencesDialog::show(const std::string& highlight_opt_key /*= std::strin
 		std::vector<wxColourPickerCtrl*> color_pickres = {m_mode_simple, m_mode_advanced, m_mode_expert};
 		for (size_t mode = 0; mode < color_pickres.size(); ++mode)
 			update_color(color_pickres[mode], palette[mode]);
+
+        if (m_optgroup_ai)
+            sync_ai_settings_from_config();
 	}
 
 	// invalidate this flag before show preferences
@@ -602,6 +608,12 @@ void PreferencesDialog::build()
 		create_settings_text_color_widget();
 		create_settings_mode_color_widget();
 
+        m_optgroup_ai = create_options_tab(_L("AI"), tabs);
+        m_optgroup_ai->on_change = [this](t_config_option_key, boost::any) {};
+        activate_options_tab(m_optgroup_ai);
+        create_ai_settings_widget();
+        sync_ai_settings_from_config();
+
 		m_optgroup_other = create_options_tab(_L("Other"), tabs);
 		m_optgroup_other->on_change = [this](t_config_option_key opt_key, boost::any value) {
 
@@ -723,8 +735,8 @@ void PreferencesDialog::build()
 std::vector<ConfigOptionsGroup*> PreferencesDialog::optgroups()
 {
 	std::vector<ConfigOptionsGroup*> out;
-	out.reserve(4);
-	for (ConfigOptionsGroup* opt : { m_optgroup_general.get(), m_optgroup_camera.get(), m_optgroup_gui.get(), m_optgroup_other.get()
+	out.reserve(5);
+	for (ConfigOptionsGroup* opt : { m_optgroup_general.get(), m_optgroup_camera.get(), m_optgroup_gui.get(), m_optgroup_ai.get(), m_optgroup_other.get()
 #ifdef _WIN32
 		, m_optgroup_dark_mode.get()
 #endif // _WIN32
@@ -740,13 +752,19 @@ std::vector<ConfigOptionsGroup*> PreferencesDialog::optgroups()
 void PreferencesDialog::update_ctrls_alignment()
 {
 	int max_ctrl_width{ 0 };
-	for (ConfigOptionsGroup* og : this->optgroups())
+	for (ConfigOptionsGroup* og : this->optgroups()) {
+        if (og == nullptr || og->custom_ctrl == nullptr)
+            continue;
 		if (int max = og->custom_ctrl->get_max_win_width();
 			max_ctrl_width < max)
 			max_ctrl_width = max;
+    }
 	if (max_ctrl_width)
-		for (ConfigOptionsGroup* og : this->optgroups())
+		for (ConfigOptionsGroup* og : this->optgroups()) {
+            if (og == nullptr || og->custom_ctrl == nullptr)
+                continue;
 			og->custom_ctrl->set_max_win_width(max_ctrl_width);
+        }
 }
 
 void PreferencesDialog::accept(wxEvent&)
@@ -786,6 +804,30 @@ void PreferencesDialog::accept(wxEvent&)
 	}
 
 	auto app_config = get_app_config();
+
+    // AI settings are stored in a dedicated [ai] section, not in root-level keys.
+    if (m_optgroup_ai && m_ai_provider_choice && m_ai_model_text && m_ai_base_url_text && m_ai_api_key_text) {
+        AI::Settings ai_settings = AI::load_settings(*app_config);
+        const wxString provider = m_ai_provider_choice->GetStringSelection();
+        ai_settings.provider = into_u8(provider.IsEmpty() ? m_ai_provider_choice->GetString(0) : provider);
+        ai_settings.model = into_u8(m_ai_model_text->GetValue());
+        ai_settings.base_url = into_u8(m_ai_base_url_text->GetValue());
+        ai_settings.api_key = into_u8(m_ai_api_key_text->GetValue());
+        if (m_ai_viewport_context_checkbox)
+            ai_settings.use_viewport_image_context = m_ai_viewport_context_checkbox->GetValue();
+        if (m_ai_viewport_size_choice) {
+            const wxString size_text = m_ai_viewport_size_choice->GetStringSelection();
+            if (!size_text.IsEmpty())
+                ai_settings.viewport_image_size_px = std::max(128, std::min(1024, atoi(size_text.ToUTF8().data())));
+        }
+        AI::save_settings(*app_config, ai_settings);
+    }
+
+    // Do not let AI keys fall through to the generic root-key persistence path.
+    for (const std::string& ai_key : { AI::key_provider(), AI::key_model(), AI::key_base_url(), AI::key_api_key(),
+                                       AI::key_use_viewport_image_context(), AI::key_agent_mode_enabled(),
+                                       AI::key_agent_mode_warning_acknowledged(), AI::key_viewport_image_size_px() })
+        m_values.erase(ai_key);
 
 	m_seq_top_layer_only_changed = false;
 	if (auto it = m_values.find("seq_top_layer_only"); it != m_values.end())
@@ -837,6 +879,9 @@ void PreferencesDialog::revert(wxEvent&)
 {
 	auto app_config = get_app_config();
 
+    if (m_optgroup_ai)
+        sync_ai_settings_from_config();
+
 	if (m_custom_toolbar_size != atoi(app_config->get("custom_toolbar_size").c_str())) {
 		app_config->set("custom_toolbar_size", (boost::format("%d") % m_custom_toolbar_size).str());
 		m_icon_size_slider->SetValue(m_custom_toolbar_size);
@@ -875,7 +920,7 @@ void PreferencesDialog::revert(wxEvent&)
 			continue;
 		}
 
-		for (auto opt_group : { m_optgroup_general, m_optgroup_camera, m_optgroup_gui, m_optgroup_other
+		for (auto opt_group : { m_optgroup_general, m_optgroup_camera, m_optgroup_gui, m_optgroup_ai, m_optgroup_other
 #ifdef _WIN32
 			, m_optgroup_dark_mode
 #endif // _WIN32
@@ -883,6 +928,8 @@ void PreferencesDialog::revert(wxEvent&)
 			, m_optgroup_render
 #endif // ENABLE_ENVIRONMENT_MAP
 			}) {
+            if (!opt_group)
+                continue;
 			if (opt_group->set_value(key, app_config->get_bool(key)))
 				break;
 		}
@@ -1179,6 +1226,141 @@ void PreferencesDialog::create_downloader_path_sizer()
 	append_preferences_option_to_searcher(m_optgroup_other, opt_key, title);
 }
 
+void PreferencesDialog::create_ai_settings_widget()
+{
+    if (!m_optgroup_ai)
+        return;
+
+    wxWindow* parent = m_optgroup_ai->parent();
+    wxGetApp().UpdateDarkUI(parent);
+
+    const int em = em_unit();
+
+    wxStaticBox* box = new wxStaticBox(parent, wxID_ANY, _L("AI integration"));
+    wxGetApp().UpdateDarkUI(box);
+    wxSizer* box_sizer = new wxStaticBoxSizer(box, wxVERTICAL);
+
+    auto* intro = new wxStaticText(parent, wxID_ANY,
+        _L("Configure your own API key to enable AI actions in the sidebar chat panel."));
+    box_sizer->Add(intro, 0, wxBOTTOM | wxEXPAND, em);
+
+    auto add_labeled_row = [parent, box_sizer, em](const wxString& label, wxWindow* control) {
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        auto* label_widget = new wxStaticText(parent, wxID_ANY, label + ":");
+        label_widget->SetMinSize(wxSize(12 * em, -1));
+        row->Add(label_widget, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+        row->Add(control, 1, wxEXPAND);
+        box_sizer->Add(row, 0, wxEXPAND | wxBOTTOM, em / 2);
+    };
+
+    m_ai_provider_choice = new wxChoice(parent, wxID_ANY);
+    m_ai_provider_choice->AppendString("openai_compatible");
+    add_labeled_row(_L("Provider"), m_ai_provider_choice);
+
+    m_ai_model_text = new wxTextCtrl(parent, wxID_ANY);
+    add_labeled_row(_L("Model"), m_ai_model_text);
+
+    m_ai_base_url_text = new wxTextCtrl(parent, wxID_ANY);
+    add_labeled_row(_L("Base URL"), m_ai_base_url_text);
+
+    m_ai_api_key_text = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PASSWORD);
+    add_labeled_row(_L("API key"), m_ai_api_key_text);
+
+    m_ai_viewport_context_checkbox = new wxCheckBox(parent, wxID_ANY, _L("Attach current viewport snapshot for AI vision"));
+    box_sizer->Add(m_ai_viewport_context_checkbox, 0, wxTOP | wxBOTTOM, em / 3);
+
+    m_ai_viewport_size_choice = new wxChoice(parent, wxID_ANY);
+    m_ai_viewport_size_choice->AppendString("256");
+    m_ai_viewport_size_choice->AppendString("384");
+    m_ai_viewport_size_choice->AppendString("448");
+    m_ai_viewport_size_choice->AppendString("512");
+    m_ai_viewport_size_choice->AppendString("640");
+    add_labeled_row(_L("Snapshot size"), m_ai_viewport_size_choice);
+
+    m_ai_key_status = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    box_sizer->Add(m_ai_key_status, 0, wxTOP, em / 3);
+
+    m_ai_factory_reset_btn = new wxButton(parent, wxID_ANY, _L("Factory reset AI"));
+    box_sizer->Add(m_ai_factory_reset_btn, 0, wxTOP, em / 2);
+
+    for (wxWindow* win : std::vector<wxWindow*>{
+             box, intro, m_ai_provider_choice, m_ai_model_text, m_ai_base_url_text, m_ai_api_key_text,
+             m_ai_viewport_context_checkbox, m_ai_viewport_size_choice, m_ai_key_status, m_ai_factory_reset_btn
+         }) {
+        if (!win)
+            continue;
+        wxGetApp().UpdateDarkUI(win);
+        win->SetFont(wxGetApp().normal_font());
+    }
+
+    m_ai_api_key_text->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
+        update_ai_key_status_label();
+    });
+    m_ai_factory_reset_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        reset_ai_settings_to_factory_defaults();
+    });
+
+    m_optgroup_ai->sizer->Add(box_sizer, 0, wxEXPAND | wxTOP, em / 2);
+}
+
+void PreferencesDialog::sync_ai_settings_from_config()
+{
+    if (!m_ai_provider_choice || !m_ai_model_text || !m_ai_base_url_text || !m_ai_api_key_text)
+        return;
+
+    const AI::Settings settings = AI::load_settings(*get_app_config());
+
+    int provider_idx = m_ai_provider_choice->FindString(from_u8(settings.provider));
+    if (provider_idx == wxNOT_FOUND)
+        provider_idx = 0;
+    m_ai_provider_choice->SetSelection(provider_idx);
+
+    m_ai_model_text->ChangeValue(from_u8(settings.model));
+    m_ai_base_url_text->ChangeValue(from_u8(settings.base_url));
+    m_ai_api_key_text->ChangeValue(from_u8(settings.api_key));
+    if (m_ai_viewport_context_checkbox)
+        m_ai_viewport_context_checkbox->SetValue(settings.use_viewport_image_context);
+    if (m_ai_viewport_size_choice) {
+        int size_idx = m_ai_viewport_size_choice->FindString(wxString::Format("%d", settings.viewport_image_size_px));
+        if (size_idx == wxNOT_FOUND)
+            size_idx = m_ai_viewport_size_choice->FindString("448");
+        if (size_idx == wxNOT_FOUND)
+            size_idx = 0;
+        m_ai_viewport_size_choice->SetSelection(size_idx);
+    }
+
+    update_ai_key_status_label();
+}
+
+void PreferencesDialog::update_ai_key_status_label()
+{
+    if (!m_ai_key_status || !m_ai_api_key_text)
+        return;
+
+    const bool has_key = !m_ai_api_key_text->GetValue().IsEmpty();
+    m_ai_key_status->SetLabel(has_key ? _L("API key present") : _L("API key missing"));
+    if (m_optgroup_ai && m_optgroup_ai->parent())
+        m_optgroup_ai->parent()->Layout();
+}
+
+void PreferencesDialog::reset_ai_settings_to_factory_defaults()
+{
+    AppConfig* app_config = get_app_config();
+    if (app_config == nullptr)
+        return;
+
+    MessageDialog confirm(this,
+                          _L("This will clear your AI API key and reset all AI settings to factory defaults.\nDo you want to continue?"),
+                          _L("Factory Reset AI"),
+                          wxICON_WARNING | wxYES | wxNO);
+    if (confirm.ShowModal() != wxID_YES)
+        return;
+
+    AI::save_settings(*app_config, AI::default_settings());
+    sync_ai_settings_from_config();
+    wxGetApp().update_ui_from_settings();
+}
+
 void PreferencesDialog::init_highlighter(const t_config_option_key& opt_key)
 {
 	if (m_blinkers.find(opt_key) != m_blinkers.end())
@@ -1187,7 +1369,7 @@ void PreferencesDialog::init_highlighter(const t_config_option_key& opt_key)
 			return;
 		}
 
-	for (auto opt_group : { m_optgroup_general, m_optgroup_camera, m_optgroup_gui, m_optgroup_other
+	for (auto opt_group : { m_optgroup_general, m_optgroup_camera, m_optgroup_gui, m_optgroup_ai, m_optgroup_other
 #ifdef _WIN32
 		, m_optgroup_dark_mode
 #endif // _WIN32
@@ -1195,6 +1377,8 @@ void PreferencesDialog::init_highlighter(const t_config_option_key& opt_key)
 		, m_optgroup_render
 #endif // ENABLE_ENVIRONMENT_MAP
 		}) {
+        if (!opt_group)
+            continue;
 		std::pair<OG_CustomCtrl*, bool*> ctrl = opt_group->get_custom_ctrl_with_blinking_ptr(opt_key, -1);
 		if (ctrl.first && ctrl.second) {
 			m_highlighter.init(ctrl);

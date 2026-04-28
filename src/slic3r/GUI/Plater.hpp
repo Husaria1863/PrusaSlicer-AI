@@ -223,6 +223,7 @@ public:
         const std::function<void()> &callable
     );
     void export_gcode(bool prefer_removable);
+    std::optional<std::string> export_gcode_explicit_path(const fs_path& requested_path, bool prefer_removable);
     void export_all_gcodes(bool prefer_removable);
     void export_stl_obj(bool extended = false, bool selection_only = false);
     bool export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path());

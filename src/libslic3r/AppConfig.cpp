@@ -244,6 +244,13 @@ void AppConfig::set_defaults()
     if (get("angle_precision").empty())
         set("angle_precision", "1.");
 
+    if (get("ai", "provider").empty())
+        set("ai", "provider", "openai_compatible");
+    if (get("ai", "model").empty())
+        set("ai", "model", "gpt-4.1-mini");
+    if (get("ai", "base_url").empty())
+        set("ai", "base_url", "https://api.openai.com/v1/chat/completions");
+
     // Remove legacy window positions/sizes
     erase("", "main_frame_maximized");
     erase("", "main_frame_pos");

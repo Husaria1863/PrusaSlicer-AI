@@ -743,6 +743,8 @@ public:
     const Model* get_model() const { return m_model; }
 
     const arr2::ArrangeSettingsView * get_arrange_settings_view() const { return &m_arrange_settings_dialog; }
+    ArrangeSettingsDb_AppCfg& arrange_settings_db() { return m_arrange_settings_db; }
+    const ArrangeSettingsDb_AppCfg& arrange_settings_db() const { return m_arrange_settings_db; }
 
     const Selection& get_selection() const { return m_selection; }
     Selection& get_selection() { return m_selection; }

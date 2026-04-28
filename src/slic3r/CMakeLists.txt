@@ -115,6 +115,19 @@ set(SLIC3R_GUI_SOURCES
     GUI/GCodeViewer.cpp    
     GUI/Preferences.cpp
     GUI/Preferences.hpp
+    GUI/AI/AIController.cpp
+    GUI/AI/AIController.hpp
+    GUI/AI/AIProvider.hpp
+    GUI/AI/OpenAIProvider.cpp
+    GUI/AI/OpenAIProvider.hpp
+    GUI/AI/ActionRegistry.cpp
+    GUI/AI/ActionRegistry.hpp
+    GUI/AI/ActionTypes.cpp
+    GUI/AI/ActionTypes.hpp
+    GUI/AI/SceneSnapshot.cpp
+    GUI/AI/SceneSnapshot.hpp
+    GUI/AI/AISettings.cpp
+    GUI/AI/AISettings.hpp
     GUI/PresetHints.cpp
     GUI/PresetHints.hpp
     GUI/GUI.cpp
