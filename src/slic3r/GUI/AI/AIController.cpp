@@ -3,7 +3,9 @@
 #include <sstream>
 #include <set>
 #include <algorithm>
+#include <chrono>
 #include <cctype>
+#include <future>
 #include <unordered_set>
 
 #include <boost/beast/core/detail/base64.hpp>
@@ -305,6 +307,47 @@ bool action_should_run_once_per_prompt(const std::string& action_name)
     return action_name == "import_printables_model";
 }
 
+ProviderReply request_actions_with_ui_pump(IAIProvider& provider,
+                                           const Settings& settings,
+                                           const std::string& prompt,
+                                           const nlohmann::json& conversation_context,
+                                           const nlohmann::json& scene_snapshot,
+                                           const nlohmann::json& tools,
+                                           const nlohmann::json& execution_history,
+                                           const nlohmann::json& runtime_context,
+                                           bool allow_actions)
+{
+    auto request_future = std::async(std::launch::async,
+                                     [&provider, &settings, &prompt, &conversation_context, &scene_snapshot,
+                                      &tools, &execution_history, &runtime_context, allow_actions]() {
+                                         return provider.request_actions(settings,
+                                                                         prompt,
+                                                                         conversation_context,
+                                                                         scene_snapshot,
+                                                                         tools,
+                                                                         execution_history,
+                                                                         runtime_context,
+                                                                         allow_actions);
+                                     });
+
+    while (request_future.wait_for(std::chrono::milliseconds(30)) != std::future_status::ready)
+        wxGetApp().Yield(true);
+
+    try {
+        return request_future.get();
+    } catch (const std::exception& e) {
+        ProviderReply out;
+        out.ok = false;
+        out.error = std::string("AI provider request failed with internal exception: ") + e.what();
+        return out;
+    } catch (...) {
+        ProviderReply out;
+        out.ok = false;
+        out.error = "AI provider request failed with unknown internal exception.";
+        return out;
+    }
+}
+
 std::string extract_setting_write_target(const ActionCall& call)
 {
     if (!is_setting_write_action(call.name))
@@ -463,17 +506,7 @@ nlohmann::json AIController::build_runtime_context(const Settings& settings)
         return nlohmann::json::object();
     }
 
-    nlohmann::json runtime = nlohmann::json::object();
-    if (m_cached_viewport_image.is_object() &&
-        m_cached_viewport_image.value("available", false) &&
-        m_cached_viewport_image.contains("data_url") &&
-        m_cached_viewport_image["data_url"].is_string()) {
-        runtime["viewport_image"] = m_cached_viewport_image;
-        runtime["viewport_image"]["source"] = "chat_cache";
-        return runtime;
-    }
-
-    runtime = capture_runtime_context(m_plater, settings);
+    nlohmann::json runtime = capture_runtime_context(m_plater, settings);
     if (runtime.contains("viewport_image") &&
         runtime["viewport_image"].is_object() &&
         runtime["viewport_image"].value("available", false)) {
@@ -550,7 +583,15 @@ ControllerResult AIController::process_prompt(const std::string& prompt, bool al
     for (int round = 0; round < max_rounds; ++round) {
         const nlohmann::json scene_snapshot = build_scene_snapshot(m_plater);
         const nlohmann::json runtime_context = build_runtime_context(settings);
-        ProviderReply reply = provider->request_actions(settings, prompt, conversation_context, scene_snapshot, tools, execution_history, runtime_context, allow_actions);
+        ProviderReply reply = request_actions_with_ui_pump(*provider,
+                                                           settings,
+                                                           prompt,
+                                                           conversation_context,
+                                                           scene_snapshot,
+                                                           tools,
+                                                           execution_history,
+                                                           runtime_context,
+                                                           allow_actions);
         if (!reply.ok) {
             out.error = reply.error.empty() ? "AI provider request failed." : reply.error;
             add_chat_turn("assistant", out.error);

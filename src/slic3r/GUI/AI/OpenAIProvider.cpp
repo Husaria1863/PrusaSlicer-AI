@@ -171,7 +171,7 @@ std::string maybe_extract_json_payload(const std::string& content)
     return trim_copy(trimmed.substr(first_newline + 1, closing - first_newline - 1));
 }
 
-ProviderReply parse_payload_text(const std::string& content_raw)
+ProviderReply parse_payload_text(const std::string& content_raw, bool strict_json)
 {
     ProviderReply out;
     std::string content = content_raw;
@@ -183,7 +183,12 @@ ProviderReply parse_payload_text(const std::string& content_raw)
     nlohmann::json payload;
     try {
         payload = nlohmann::json::parse(payload_text);
-    } catch (...) {
+    } catch (const std::exception& e) {
+        if (strict_json) {
+            out.ok = false;
+            out.error = std::string("Provider returned invalid JSON payload: ") + e.what();
+            return out;
+        }
         out.ok = true;
         out.assistant_text = trim_copy(strip_control_chars(content));
         if (out.assistant_text.size() > kMaxAssistantTextChars)
@@ -219,6 +224,12 @@ ProviderReply parse_payload_text(const std::string& content_raw)
 
             out.actions.push_back(std::move(call));
         }
+    }
+
+    if (strict_json && out.assistant_text.empty() && out.actions.empty()) {
+        out.ok = false;
+        out.error = "Provider returned an empty JSON payload (no assistant_text and no actions).";
+        return out;
     }
 
     out.ok = true;
@@ -319,7 +330,7 @@ std::string collect_gemini_content_text(const nlohmann::json& root)
     return content;
 }
 
-ProviderReply parse_openai_response_json(const std::string& body)
+ProviderReply parse_openai_response_json(const std::string& body, bool strict_json)
 {
     ProviderReply out;
 
@@ -352,10 +363,10 @@ ProviderReply parse_openai_response_json(const std::string& body)
         return out;
     }
 
-    return parse_payload_text(collect_openai_content_text(choice["message"]));
+    return parse_payload_text(collect_openai_content_text(choice["message"]), strict_json);
 }
 
-ProviderReply parse_anthropic_response_json(const std::string& body)
+ProviderReply parse_anthropic_response_json(const std::string& body, bool strict_json)
 {
     ProviderReply out;
 
@@ -383,10 +394,10 @@ ProviderReply parse_anthropic_response_json(const std::string& body)
         return out;
     }
 
-    return parse_payload_text(content);
+    return parse_payload_text(content, strict_json);
 }
 
-ProviderReply parse_gemini_response_json(const std::string& body)
+ProviderReply parse_gemini_response_json(const std::string& body, bool strict_json)
 {
     ProviderReply out;
 
@@ -421,7 +432,7 @@ ProviderReply parse_gemini_response_json(const std::string& body)
         return out;
     }
 
-    return parse_payload_text(content);
+    return parse_payload_text(content, strict_json);
 }
 
 bool response_indicates_length_truncation_openai(const std::string& body)
@@ -528,38 +539,7 @@ void perform_provider_post(const std::string& url,
         .perform_sync(retry_opts);
 }
 
-std::string url_encode_query_component(const std::string& value)
-{
-    static const char hex[] = "0123456789ABCDEF";
-
-    std::string out;
-    out.reserve(value.size() * 3);
-    for (unsigned char c : value) {
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out.push_back(static_cast<char>(c));
-        } else {
-            out.push_back('%');
-            out.push_back(hex[(c >> 4) & 0x0F]);
-            out.push_back(hex[c & 0x0F]);
-        }
-    }
-    return out;
-}
-
-std::string append_query_param(std::string url, const std::string& key, const std::string& value)
-{
-    if (url.find('?') == std::string::npos)
-        url.push_back('?');
-    else if (!url.empty() && url.back() != '?' && url.back() != '&')
-        url.push_back('&');
-
-    url += key;
-    url.push_back('=');
-    url += url_encode_query_component(value);
-    return url;
-}
-
-std::string build_gemini_request_url(std::string base_url, const std::string& model, const std::string& api_key)
+std::string build_gemini_request_url(std::string base_url, const std::string& model)
 {
     std::string url = trim_copy(base_url);
     if (url.empty())
@@ -584,7 +564,7 @@ std::string build_gemini_request_url(std::string base_url, const std::string& mo
         }
     }
 
-    return append_query_param(std::move(url), "key", api_key);
+    return url;
 }
 
 InlineImageData extract_inline_image(const nlohmann::json& runtime_context)
@@ -819,7 +799,7 @@ public:
             return out;
         }
 
-        ProviderReply parsed = parse_anthropic_response_json(response_body);
+        ProviderReply parsed = parse_anthropic_response_json(response_body, allow_actions);
         if (!parsed.ok && parsed.error.empty())
             parsed.error = "Failed to parse AI provider response.";
 
@@ -862,7 +842,7 @@ public:
             return out;
         }
 
-        const std::string url = build_gemini_request_url(base_url, model, settings.api_key);
+        const std::string url = build_gemini_request_url(base_url, model);
         const std::string system_prompt = build_system_prompt(allow_actions);
         const nlohmann::json user_context = build_user_context_json(user_prompt, conversation_context, scene_snapshot, tools, execution_history, runtime_context);
         const std::string user_context_text = user_context.dump();
@@ -914,7 +894,8 @@ public:
             perform_provider_post(
                 url,
                 {
-                    {"Content-Type", "application/json"}
+                    {"Content-Type", "application/json"},
+                    {"x-goog-api-key", settings.api_key}
                 },
                 body,
                 retry_opts,
@@ -967,7 +948,7 @@ public:
             return out;
         }
 
-        ProviderReply parsed = parse_gemini_response_json(response_body);
+        ProviderReply parsed = parse_gemini_response_json(response_body, allow_actions);
         if (!parsed.ok && parsed.error.empty())
             parsed.error = "Failed to parse AI provider response.";
 
@@ -1128,7 +1109,7 @@ ProviderReply OpenAICompatibleProvider::request_actions(const Settings& settings
         return out;
     }
 
-    ProviderReply parsed = parse_openai_response_json(response_body);
+    ProviderReply parsed = parse_openai_response_json(response_body, allow_actions);
     if (!parsed.ok && parsed.error.empty())
         parsed.error = "Failed to parse AI provider response.";
 
