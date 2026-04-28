@@ -171,6 +171,55 @@ std::string maybe_extract_json_payload(const std::string& content)
     return trim_copy(trimmed.substr(first_newline + 1, closing - first_newline - 1));
 }
 
+std::string extract_first_json_object_text(const std::string& text)
+{
+    const size_t start = text.find('{');
+    if (start == std::string::npos)
+        return {};
+
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+
+    for (size_t i = start; i < text.size(); ++i) {
+        const char c = text[i];
+
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '"') {
+                in_string = false;
+                continue;
+            }
+            continue;
+        }
+
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+
+        if (c == '{') {
+            ++depth;
+            continue;
+        }
+
+        if (c == '}') {
+            --depth;
+            if (depth == 0)
+                return text.substr(start, i - start + 1);
+        }
+    }
+
+    return {};
+}
+
 ProviderReply parse_payload_text(const std::string& content_raw, bool strict_json)
 {
     ProviderReply out;
@@ -184,16 +233,29 @@ ProviderReply parse_payload_text(const std::string& content_raw, bool strict_jso
     try {
         payload = nlohmann::json::parse(payload_text);
     } catch (const std::exception& e) {
-        if (strict_json) {
-            out.ok = false;
-            out.error = std::string("Provider returned invalid JSON payload: ") + e.what();
+        // Some providers occasionally append extra JSON/text after a valid top-level JSON object.
+        // Recover by parsing the first balanced JSON object.
+        const std::string first_object_text = extract_first_json_object_text(payload_text);
+        if (!first_object_text.empty()) {
+            try {
+                payload = nlohmann::json::parse(first_object_text);
+            } catch (...) {
+                // Fall through to strict/non-strict handlers below.
+            }
+        }
+
+        if (!payload.is_object()) {
+            if (strict_json) {
+                out.ok = false;
+                out.error = std::string("Provider returned invalid JSON payload: ") + e.what();
+                return out;
+            }
+            out.ok = true;
+            out.assistant_text = trim_copy(strip_control_chars(content));
+            if (out.assistant_text.size() > kMaxAssistantTextChars)
+                out.assistant_text.resize(kMaxAssistantTextChars);
             return out;
         }
-        out.ok = true;
-        out.assistant_text = trim_copy(strip_control_chars(content));
-        if (out.assistant_text.size() > kMaxAssistantTextChars)
-            out.assistant_text.resize(kMaxAssistantTextChars);
-        return out;
     }
 
     if (payload.contains("assistant_text") && payload["assistant_text"].is_string())
