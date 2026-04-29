@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/d12bea13-2126-4df3-8f82-d382a1a0473b
+
 ![PrusaSlicer logo](/resources/icons/PrusaSlicer.png?raw=true)
 
 # PrusaSlicer AI Fork
